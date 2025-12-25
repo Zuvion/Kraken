@@ -511,7 +511,7 @@ async function openWithdraw(){
       <div class="section-header"><div class="section-title">Вывод USDT</div></div>
       <div class="section-content">
         <label class="label">Сумма (USDT)</label>
-        <input type="number" inputmode="decimal" id="wAmount" class="input" placeholder="50" min="10" step="0.01"/>
+        <input type="number" inputmode="decimal" id="wAmount" class="input" placeholder="630" min="630" step="0.01"/>
         <div class="notice small">💡 Минимальная сумма: 10 USDT</div>
         
         <div class="notice" style="margin-top:12px;padding:10px;background:rgba(98,77,228,0.1);border-left:3px solid #624DE4;border-radius:4px;">
@@ -536,12 +536,13 @@ async function openWithdraw(){
   </div>`;
   document.getElementById('backAssets').onclick = renderAssets;
   const amountEl=document.getElementById('wAmount'); const cardEl=document.getElementById('wCard'); const nameEl=document.getElementById('wName'); const btn=document.getElementById('wSubmit'); const calcEl=document.getElementById('wCalc');
-  
+
+  const MIN_WITHDRAW = 630;
   async function recalc(){
     const a=Number(amountEl.value||0);
     const card=(cardEl.value||'').replace(/\s+/g,'');
     const name=(nameEl.value||'').trim();
-    btn.disabled=!(a>=10 && card.length>=13 && name.length>=3);
+    btn.disabled=!(a>=MIN_WITHDRAW && card.length>=13 && name.length>=3);
     
     if(a>=10){
       try{
