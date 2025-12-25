@@ -47,7 +47,7 @@ function showTelegramOnlyError() {
 }
 
 // Development mode bypass (remove in production)
-const DEV_MODE = false;
+const DEV_MODE = true;
 
 // Validate Telegram environment
 if (!DEV_MODE && !isInsideTelegram()) {
@@ -511,8 +511,8 @@ async function openWithdraw(){
       <div class="section-header"><div class="section-title">Вывод USDT</div></div>
       <div class="section-content">
         <label class="label">Сумма (USDT)</label>
-        <input type="number" inputmode="decimal" id="wAmount" class="input" placeholder="630" min="630" step="0.01"/>
-        <div class="notice small">💡 Минимальная сумма: 630 USDT</div>
+        <input type="number" inputmode="decimal" id="wAmount" class="input" placeholder="650" min="1" step="0.01"/>
+        <div class="notice small">💡 Минимальная сумма: 630 USDT (~60 000 ₽)</div>
         
         <div class="notice" style="margin-top:12px;padding:10px;background:rgba(98,77,228,0.1);border-left:3px solid #624DE4;border-radius:4px;">
           💸 <b>Важно:</b> Вывод осуществляется в <b>рублях (RUB)</b> на банковскую карту с учётом актуального курса USD/RUB.
@@ -536,28 +536,34 @@ async function openWithdraw(){
   </div>`;
   document.getElementById('backAssets').onclick = renderAssets;
   const amountEl=document.getElementById('wAmount'); const cardEl=document.getElementById('wCard'); const nameEl=document.getElementById('wName'); const btn=document.getElementById('wSubmit'); const calcEl=document.getElementById('wCalc');
-  const MIN_WITHDRAW = 630;
+  
+  const MIN_WITHDRAW = 630; // Минимальная сумма вывода в USDT
+  
   async function recalc(){
     const a=Number(amountEl.value||0);
     const card=(cardEl.value||'').replace(/\s+/g,'');
     const name=(nameEl.value||'').trim();
+    
+    // Блокируем кнопку если сумма меньше минимума
     btn.disabled=!(a>=MIN_WITHDRAW && card.length>=13 && name.length>=3);
     
     if(a>0 && a<MIN_WITHDRAW){
-  calcEl.innerHTML=`<div style="margin-top:8px;color:#FF5252;font-weight:bold;">❌ Минимальная сумма вывода: ${MIN_WITHDRAW} USDT (~60 000 ₽)</div>`;
-  amountEl.style.borderColor='#FF5252';
-}else if(a>=MIN_WITHDRAW){
-  amountEl.style.borderColor='';
-  try{
-    const FEE_PERCENT = 5.7;
-    const fee = (a * FEE_PERCENT / 100).toFixed(4);
-    const afterFee = (a - fee).toFixed(4);
-    calcEl.innerHTML=`<div style="margin-top:8px;">💳 Комиссия: <b>${fee} USDT (${FEE_PERCENT}%)</b></div><div>✅ К выводу: <b>${afterFee} USDT</b></div>`;
-  }catch(e){ calcEl.textContent=''; }
-}else{ 
-  amountEl.style.borderColor='';
-  calcEl.textContent=''; 
-}
+      // Красное предупреждение
+      calcEl.innerHTML=`<div style="margin-top:8px;color:#FF5252;font-weight:bold;">❌ Минимальная сумма вывода: ${MIN_WITHDRAW} USDT (~60 000 ₽)</div>`;
+      amountEl.style.borderColor='#FF5252';
+    }else if(a>=MIN_WITHDRAW){
+      amountEl.style.borderColor='';
+      try{
+        const FEE_PERCENT = 5.7;
+        const fee = (a * FEE_PERCENT / 100).toFixed(4);
+        const afterFee = (a - fee).toFixed(4);
+        calcEl.innerHTML=`<div style="margin-top:8px;">💳 Комиссия: <b>${fee} USDT (${FEE_PERCENT}%)</b></div><div>✅ К выводу: <b>${afterFee} USDT</b></div>`;
+      }catch(e){ calcEl.textContent=''; }
+    }else{ 
+      amountEl.style.borderColor='';
+      calcEl.textContent=''; 
+    }
+  }
   
   amountEl.oninput = recalc;
   cardEl.oninput = recalc;
