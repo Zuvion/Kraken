@@ -47,7 +47,7 @@ function showTelegramOnlyError() {
 }
 
 // Development mode bypass (remove in production)
-const DEV_MODE = false;
+const DEV_MODE = true;
 
 // Validate Telegram environment
 if (!DEV_MODE && !isInsideTelegram()) {
