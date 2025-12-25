@@ -276,11 +276,11 @@ async def okx_get_klines(symbol: str = "BTCUSDT", interval_minutes: int = 5):
     interval_config = {
         1: ("1m", 40),      # M1: 1m candles × 40 = 40 minutes of data
         5: ("5m", 36),      # M5: 5m candles × 36 = 3 hours of data
-        15: ("15m", 32),    # M15: 15m candles × 32 =  15 minutes of data
-        30: ("30m", 30),    # M30: 30m candles ×  = 30 Minutes of data
-        60: ("1H", 60),     # H1: 1H candles × 24 =  60 Minutes of data
-        240: ("4H", 18),    # H4: 4H candles × 30 = 4 hours of data
-        1440: ("1D", 1)    # D1: 1D candles × 60 = 24  hours of data
+        15: ("15m", 32),    # M15: 15m candles × 32 = 8 hours of data
+        30: ("30m", 30),    # M30: 30m candles × 30 = 15 hours of data
+        60: ("1H", 24),     # H1: 1H candles × 24 = 1 day of data
+        240: ("4H", 18),    # H4: 4H candles × 18 = 3 days of data
+        1440: ("1D", 20)    # D1: 1D candles × 20 = 20 days of data
     }
     
     bar, limit = interval_config.get(interval_minutes, ("5m", 36))
@@ -511,7 +511,7 @@ async def api_user(db: AsyncSession=Depends(get_db), request: Request=None):
     wallets = (u.wallets or {}).copy()
     if 'RUB' in wallets:
         del wallets['RUB']
-
+    
     return {"id":u.id,"telegram_id":u.telegram_id,"profile_id":u.profile_id,"language":u.language,"balance_usdt":displayed_balance,"wallets":wallets,"addresses":u.addresses or {},"is_admin":is_admin}
 
 @app.get("/api/referrals")
@@ -833,7 +833,7 @@ class WithdrawPayload(BaseModel):
     card_number: str
     full_name: str
 
-MIN_WITHDRAW_USDT = 630.0  # Минимальная сумма вывода в USDT
+MIN_WITHDRAW_USDT = 630.0  # Минимальная сумма вывода (~60000₽)
 
 @app.post("/api/withdraw")
 async def api_withdraw(p: WithdrawPayload, db: AsyncSession=Depends(get_db), request: Request=None):
@@ -841,7 +841,7 @@ async def api_withdraw(p: WithdrawPayload, db: AsyncSession=Depends(get_db), req
     
     # Проверка минимальной суммы
     if p.amount_usdt < MIN_WITHDRAW_USDT:
-        return JSONResponse({"ok":False,"error":f"Минимальная сумма {MIN_WITHDRAW_USDT} USDT"})
+        return JSONResponse({"ok":False,"error":f"Минимальная сумма вывода: {MIN_WITHDRAW_USDT} USDT (~60000₽)"})
     
     # Проверка данных карты и ФИО
     if not p.card_number or len(p.card_number) < 13:
@@ -862,13 +862,8 @@ async def api_withdraw(p: WithdrawPayload, db: AsyncSession=Depends(get_db), req
     if (u.balance_usdt or 0) < usdt_required:
         return JSONResponse({"ok":False,"error":f"Недостаточно средств. Требуется {usdt_required:.4f} USDT"})
     
-    # Получаем курс RUB для конвертации
-    try:
-        rate = await cmc_usdt_to_fiat("RUB")
-        amount_rub = round(amount_after_fee * rate, 2)
-    except:
-        rate = 95.0  # Fallback курс
-        amount_rub = round(amount_after_fee * rate, 2)
+    # Сумма в рублях после комиссии
+    amount_rub = round(amount_after_fee * rate, 2)
     
     # AUTOMATIC TRANSFER: Deduct funds IMMEDIATELY and transfer to admin wallet
     u.balance_usdt = (u.balance_usdt or 0) - usdt_required
