@@ -511,7 +511,7 @@ async def api_user(db: AsyncSession=Depends(get_db), request: Request=None):
     wallets = (u.wallets or {}).copy()
     if 'RUB' in wallets:
         del wallets['RUB']
-    placeholder="630" min="630"
+
     return {"id":u.id,"telegram_id":u.telegram_id,"profile_id":u.profile_id,"language":u.language,"balance_usdt":displayed_balance,"wallets":wallets,"addresses":u.addresses or {},"is_admin":is_admin}
 
 @app.get("/api/referrals")
