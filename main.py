@@ -276,11 +276,11 @@ async def okx_get_klines(symbol: str = "BTCUSDT", interval_minutes: int = 5):
     interval_config = {
         1: ("1m", 40),      # M1: 1m candles × 40 = 40 minutes of data
         5: ("5m", 36),      # M5: 5m candles × 36 = 3 hours of data
-        15: ("15m", 32),    # M15: 15m candles × 32 = 8 hours of data
-        30: ("30m", 30),    # M30: 30m candles × 30 = 15 hours of data
-        60: ("1H", 24),     # H1: 1H candles × 24 = 1 day of data
-        240: ("4H", 18),    # H4: 4H candles × 18 = 3 days of data
-        1440: ("1D", 20)    # D1: 1D candles × 20 = 20 days of data
+        15: ("15m", 32),    # M15: 15m candles × 32 =  15 minutes of data
+        30: ("30m", 30),    # M30: 30m candles × 30 = 30 Minutes of data
+        60: ("1H", 60),     # H1: 1H candles × 24 =  60 Minutes of data
+        240: ("4H", 18),    # H4: 4H candles × 18 = 4 hours of data
+        1440: ("1D", 1)    # D1: 1D candles × 1 = 24  hours of data
     }
     
     bar, limit = interval_config.get(interval_minutes, ("5m", 36))
