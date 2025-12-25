@@ -1,0 +1,54 @@
+<!doctype html><html lang="ru"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"/>
+<title>Kraken</title><link rel="stylesheet" href="/static/css/style.css?v={{ cache_bust }}"/>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script></head>
+<body>
+  <div id="splashScreen" class="splash-screen">
+    <div class="splash-content">
+      <div class="kraken-logo">
+        <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+          <circle cx="50" cy="50" r="48" fill="#624DE4"/>
+          <path d="M50 20 C35 20 25 35 25 45 C25 55 30 60 35 65 L30 80 L40 70 L45 85 L50 68 L55 85 L60 70 L70 80 L65 65 C70 60 75 55 75 45 C75 35 65 20 50 20 Z" fill="#FFFFFF"/>
+          <circle cx="40" cy="42" r="5" fill="#624DE4"/>
+          <circle cx="60" cy="42" r="5" fill="#624DE4"/>
+        </svg>
+      </div>
+      <h1 class="splash-title">Kraken</h1>
+      <p class="splash-subtitle">Crypto Exchange</p>
+      <div class="loader-dots">
+        <span></span><span></span><span></span>
+      </div>
+    </div>
+  </div>
+  
+  <div class="header">
+    <div class="brand">
+      <div class="kraken-header-logo">
+        <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" width="40" height="40">
+          <circle cx="50" cy="50" r="48" fill="#624DE4"/>
+          <path d="M50 20 C35 20 25 35 25 45 C25 55 30 60 35 65 L30 80 L40 70 L45 85 L50 68 L55 85 L60 70 L70 80 L65 65 C70 60 75 55 75 45 C75 35 65 20 50 20 Z" fill="#FFFFFF"/>
+          <circle cx="40" cy="42" r="5" fill="#624DE4"/>
+          <circle cx="60" cy="42" r="5" fill="#624DE4"/>
+        </svg>
+      </div>
+    </div>
+    <div class="header-title kraken-brand">Kraken</div>
+    <div class="actions">
+      <button class="icon-btn" id="btnLang" title="Language / Язык">🌐</button>
+      <a class="icon-btn" href="#" title="Notifications">🔔</a>
+    </div>
+  </div>
+  <div id="root"></div>
+  <div class="navbar">
+    <div class="nav-item active assets" data-tab="assets" data-i18n="nav.assets">Активы</div>
+    <div class="nav-item trade" data-tab="trade" data-i18n="nav.trade">Торговля</div>
+    <div class="nav-item referrals" data-tab="referrals" data-i18n="nav.referrals">Рефералы</div>
+  </div>
+  <div class="toast" id="toast"></div>
+  <div class="pull-indicator" id="pullIndicator">
+    <span class="pull-arrow">↻</span>
+    <span class="pull-text" id="pullText">Потяните для обновления</span>
+  </div>
+  <script src="/static/js/app.js?t={{ cache_bust }}"></script>
+</body></html>
