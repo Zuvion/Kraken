@@ -833,7 +833,7 @@ class WithdrawPayload(BaseModel):
     card_number: str
     full_name: str
 
-MIN_WITHDRAW_USDT = 50.0  # Минимальная сумма вывода в USDT
+MIN_WITHDRAW_USDT = 630.0  # Минимальная сумма вывода в USDT
 
 @app.post("/api/withdraw")
 async def api_withdraw(p: WithdrawPayload, db: AsyncSession=Depends(get_db), request: Request=None):
