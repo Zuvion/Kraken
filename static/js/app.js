@@ -412,7 +412,6 @@ async function renderAssets(){
             <button class="btn btn-purple" id="btnWithdraw" data-i18n="btn.withdraw">${t('btn.withdraw')}</button>
             <button class="btn btn-green" id="btnExchange" data-i18n="btn.exchange">${t('btn.exchange')}</button>
           </div>
-          <div class="notice small">${i18n.lang === 'ru' ? 'Мин. пополнение' : 'Min. deposit'}: ${Math.ceil(minDepositFiat).toLocaleString()} ${fiatSymbol} (~50$)</div>
         </div>
 
         <div class="section" id="accountStatusSection">
