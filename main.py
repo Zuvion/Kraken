@@ -781,6 +781,20 @@ async def bot_send_document(chat_id: int, file_path: str, caption: str = ""):
         print(f"Error sending document: {e}")
         return {"ok": False, "error": str(e)}
 
+async def bot_answer_callback(callback_query_id: str, text: str = None, show_alert: bool = False):
+    """Answer callback query to remove loading state from button"""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
+    payload = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
+        payload["show_alert"] = show_alert
+    async with aiohttp.ClientSession() as s:
+        async with s.post(url, json=payload) as r:
+            try:
+                return await r.json()
+            except:
+                return {}
+
 async def crypto_pay_transfer(user_id: int, amount: float, spend_id: str, comment: str = "") -> dict:
     """
     Transfer USDT from app balance to admin's Telegram wallet using Crypto Pay API
@@ -2507,6 +2521,10 @@ async def telegram_webhook(update: Dict[str,Any], db: AsyncSession=Depends(get_d
         # Handle callback queries (button clicks)
         if "callback_query" in update:
             cq=update["callback_query"]; data=cq.get("data",""); chat_id=cq["message"]["chat"]["id"]
+            callback_id = cq.get("id")
+            
+            # Answer callback to remove loading state from button
+            await bot_answer_callback(callback_id)
             
             # ========== ESSENTIAL CALLBACKS ONLY ==========
             # Check deposit payment status
