@@ -189,6 +189,18 @@ class Check(Base):
     expires_at=Column(DateTime, nullable=True)  # Optional expiration
     created_at=Column(DateTime, default=datetime.utcnow)
 
+class AdminLog(Base):
+    __tablename__="admin_logs"
+    id=Column(Integer, primary_key=True)
+    admin_id=Column(String)
+    user_id=Column(Integer, nullable=True)
+    action=Column(String)
+    before_value=Column(Text, nullable=True)
+    after_value=Column(Text, nullable=True)
+    reason=Column(Text, nullable=True)
+    details=Column(JSON, default=dict)
+    created_at=Column(DateTime, default=datetime.utcnow)
+
 # Admin reply state: stores which user admin is replying to
 admin_reply_state = {}
 
@@ -199,6 +211,11 @@ admin_broadcast_state = {}
 # Admin balance state: stores balance management flow
 # Format: {admin_id: {"action": "select_user"|"select_action", "profile_id": int}}
 admin_balance_state = {}
+
+# Admin FSM states for inline button dialogs
+# States: awaiting_message, awaiting_amount, awaiting_reason, awaiting_search_id, awaiting_broadcast
+# Format: {admin_id: {"state": "...", "user_id": ..., "action": "...", "data": {...}, "message_id": ...}}
+admin_states = {}
 
 async def get_db():
     async with AsyncSessionLocal() as s: yield s
@@ -794,6 +811,34 @@ async def bot_answer_callback(callback_query_id: str, text: str = None, show_ale
                 return await r.json()
             except:
                 return {}
+
+async def bot_edit_message(chat_id: int, message_id: int, text: str, buttons: List[List[Dict[str,str]]]|None=None, parse_mode: str="HTML"):
+    """Edit an existing message with new text and optional inline buttons"""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": parse_mode}
+    if buttons:
+        payload["reply_markup"] = {"inline_keyboard": buttons}
+    async with aiohttp.ClientSession() as s:
+        async with s.post(url, json=payload) as r:
+            try:
+                return await r.json()
+            except:
+                return {}
+
+async def log_admin_action(db: AsyncSession, admin_id: str, action: str, user_id: int = None, before_value: str = None, after_value: str = None, reason: str = None, details: dict = None):
+    """Log an admin action to the database"""
+    log = AdminLog(
+        admin_id=str(admin_id),
+        user_id=user_id,
+        action=action,
+        before_value=before_value,
+        after_value=after_value,
+        reason=reason,
+        details=details or {}
+    )
+    db.add(log)
+    await db.commit()
+    return log
 
 async def crypto_pay_transfer(user_id: int, amount: float, spend_id: str, comment: str = "") -> dict:
     """
@@ -2618,8 +2663,635 @@ async def telegram_webhook(update: Dict[str,Any], db: AsyncSession=Depends(get_d
             
             # ========== END ESSENTIAL CALLBACKS ==========
             
-            # ========== ADMIN USER MANAGEMENT CALLBACKS ==========
-            # Handle select_user callback - show user management options
+            # ========== NEW INLINE ADMIN PANEL CALLBACKS ==========
+            
+            # Admin: Main menu
+            elif data == "adm:menu":
+                if str(chat_id) == str(ADMIN_ID):
+                    admin_states.pop(str(chat_id), None)
+                    msg_id = cq["message"]["message_id"]
+                    admin_text = """🔐 <b>Админ панель Kraken</b>
+
+Добро пожаловать в панель управления!
+Выберите раздел для управления:"""
+                    admin_buttons = [
+                        [{"text": "👥 Пользователи", "callback_data": "adm:users:page:1"}, {"text": "💸 Выводы", "callback_data": "adm:withdrawals:menu"}],
+                        [{"text": "📊 Статистика", "callback_data": "adm:stats:menu"}, {"text": "📣 Рассылка", "callback_data": "adm:broadcast:menu"}],
+                        [{"text": "⚙️ Управление", "callback_data": "adm:manage:menu"}, {"text": "⬅️ Выйти", "callback_data": "adm:exit"}]
+                    ]
+                    await bot_edit_message(chat_id, msg_id, admin_text, admin_buttons)
+            
+            # Admin: Exit to user menu
+            elif data == "adm:exit":
+                if str(chat_id) == str(ADMIN_ID):
+                    admin_states.pop(str(chat_id), None)
+                    await bot_send_message(chat_id, "✅ Вы вышли из админ панели.\nИспользуйте /admin для возврата.")
+            
+            # Admin: Users list with pagination
+            elif data.startswith("adm:users:page:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    page = int(data.split(":")[3])
+                    per_page = 10
+                    offset = (page - 1) * per_page
+                    
+                    total_users = (await db.execute(select(func.count(User.id)))).scalar()
+                    users = (await db.execute(select(User).order_by(User.created_at.desc()).offset(offset).limit(per_page))).scalars().all()
+                    
+                    total_pages = (total_users + per_page - 1) // per_page
+                    
+                    msg = f"👥 <b>Пользователи</b> ({total_users})\n📄 Страница {page}/{total_pages}\n\nВыберите пользователя:"
+                    
+                    buttons = []
+                    for u in users:
+                        status = ""
+                        if u.is_blocked: status += "🚫"
+                        if u.is_verified: status += "✅"
+                        if u.is_premium: status += "⭐"
+                        username = u.username or "Аноним"
+                        btn_text = f"{username} (ID: {u.profile_id}) {status}"
+                        buttons.append([{"text": btn_text, "callback_data": f"adm:user:open:{u.profile_id}"}])
+                    
+                    nav_row = []
+                    if page > 1:
+                        nav_row.append({"text": "◀️", "callback_data": f"adm:users:page:{page-1}"})
+                    nav_row.append({"text": f"{page}/{total_pages}", "callback_data": "adm:noop"})
+                    if page < total_pages:
+                        nav_row.append({"text": "▶️", "callback_data": f"adm:users:page:{page+1}"})
+                    if nav_row:
+                        buttons.append(nav_row)
+                    
+                    buttons.append([{"text": "🔍 Поиск по ID", "callback_data": "adm:users:search"}])
+                    buttons.append([{"text": "⬅️ Назад", "callback_data": "adm:menu"}])
+                    
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Search user by ID
+            elif data == "adm:users:search":
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    admin_states[str(chat_id)] = {"state": "awaiting_search_id", "message_id": msg_id}
+                    msg = "🔍 <b>Поиск пользователя</b>\n\nВведите Profile ID пользователя:"
+                    buttons = [[{"text": "❌ Отмена", "callback_data": "adm:users:page:1"}]]
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Open user profile
+            elif data.startswith("adm:user:open:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    profile_id = int(data.split(":")[3])
+                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                    
+                    if not user:
+                        await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
+                        return {"ok": True}
+                    
+                    verify_icon = "✅" if user.is_verified else "❌"
+                    premium_icon = "⭐" if user.is_premium else "❌"
+                    block_icon = "🚫" if user.is_blocked else "✅"
+                    displayed_bal = (user.balance_usdt or 0) + (user.virtual_balance or 0)
+                    
+                    msg = f"👤 <b>Пользователь #{profile_id}</b>\n\n"
+                    msg += f"📛 Username: @{user.username or 'N/A'}\n"
+                    msg += f"🆔 Telegram: {user.telegram_id}\n"
+                    msg += f"💰 Баланс: {displayed_bal:.2f} USDT\n"
+                    msg += f"   💎 Реальный: {user.balance_usdt:.2f}\n"
+                    msg += f"   🎭 Виртуальный: {user.virtual_balance:.2f}\n"
+                    msg += f"✅ Верификация: {verify_icon}\n"
+                    msg += f"⭐ Premium: {premium_icon}\n"
+                    msg += f"🔒 Статус: {block_icon}\n"
+                    if user.is_blocked and user.block_reason:
+                        msg += f"📝 Причина: {user.block_reason}\n"
+                    msg += f"📅 Регистрация: {user.created_at.strftime('%d.%m.%Y') if user.created_at else 'N/A'}"
+                    
+                    block_btn = "✅ Разблокировать" if user.is_blocked else "🚫 Заблокировать"
+                    buttons = [
+                        [{"text": "💬 Написать", "callback_data": f"adm:user:msg:{profile_id}"}, {"text": "💰 Баланс", "callback_data": f"adm:user:bal:{profile_id}"}],
+                        [{"text": "⭐ Premium", "callback_data": f"adm:user:prem:{profile_id}"}, {"text": "✅ Верификация", "callback_data": f"adm:user:verify:{profile_id}"}],
+                        [{"text": block_btn, "callback_data": f"adm:user:block:{profile_id}"}, {"text": "🧾 История", "callback_data": f"adm:user:history:{profile_id}"}],
+                        [{"text": "⬅️ Назад", "callback_data": "adm:users:page:1"}]
+                    ]
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Toggle premium
+            elif data.startswith("adm:user:prem:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    profile_id = int(data.split(":")[3])
+                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                    if user:
+                        old_val = user.is_premium
+                        user.is_premium = not user.is_premium
+                        await db.commit()
+                        await log_admin_action(db, str(ADMIN_ID), "toggle_premium", user.id, str(old_val), str(user.is_premium))
+                        status = "⭐ Premium активирован" if user.is_premium else "❌ Premium отключен"
+                        msg = f"👤 <b>Пользователь #{profile_id}</b>\n\n{status}"
+                        buttons = [[{"text": "⬅️ К профилю", "callback_data": f"adm:user:open:{profile_id}"}]]
+                        await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Toggle verification
+            elif data.startswith("adm:user:verify:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    profile_id = int(data.split(":")[3])
+                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                    if user:
+                        old_val = user.is_verified
+                        user.is_verified = not user.is_verified
+                        await db.commit()
+                        await log_admin_action(db, str(ADMIN_ID), "toggle_verification", user.id, str(old_val), str(user.is_verified))
+                        status = "✅ Верифицирован" if user.is_verified else "❌ Верификация снята"
+                        msg = f"👤 <b>Пользователь #{profile_id}</b>\n\n{status}"
+                        buttons = [[{"text": "⬅️ К профилю", "callback_data": f"adm:user:open:{profile_id}"}]]
+                        await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Block/unblock user
+            elif data.startswith("adm:user:block:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    profile_id = int(data.split(":")[3])
+                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                    if user:
+                        if user.is_blocked:
+                            old_val = f"blocked: {user.block_reason}"
+                            user.is_blocked = False
+                            user.block_reason = None
+                            await db.commit()
+                            await log_admin_action(db, str(ADMIN_ID), "unblock_user", user.id, old_val, "unblocked")
+                            msg = f"✅ <b>Пользователь #{profile_id} разблокирован</b>"
+                            try:
+                                await bot_send_message(int(user.telegram_id), "✅ Ваш аккаунт разблокирован. Добро пожаловать!")
+                            except: pass
+                            buttons = [[{"text": "⬅️ К профилю", "callback_data": f"adm:user:open:{profile_id}"}]]
+                            await bot_edit_message(chat_id, msg_id, msg, buttons)
+                        else:
+                            admin_states[str(chat_id)] = {"state": "awaiting_reason", "action": "block", "user_id": profile_id, "message_id": msg_id}
+                            msg = f"🚫 <b>Блокировка пользователя #{profile_id}</b>\n\nВведите причину блокировки:"
+                            buttons = [[{"text": "❌ Отмена", "callback_data": f"adm:user:open:{profile_id}"}]]
+                            await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Balance management
+            elif data.startswith("adm:user:bal:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    profile_id = int(data.split(":")[3])
+                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                    if user:
+                        displayed_bal = (user.balance_usdt or 0) + (user.virtual_balance or 0)
+                        msg = f"💰 <b>Баланс пользователя #{profile_id}</b>\n\n"
+                        msg += f"📊 Отображаемый: {displayed_bal:.2f} USDT\n"
+                        msg += f"💎 Реальный: {user.balance_usdt:.2f} USDT\n"
+                        msg += f"🎭 Виртуальный: {user.virtual_balance:.2f} USDT\n\n"
+                        msg += "Выберите действие:"
+                        
+                        buttons = [
+                            [{"text": "➕ Добавить", "callback_data": f"adm:user:bal:add:{profile_id}"}, {"text": "➖ Списать", "callback_data": f"adm:user:bal:sub:{profile_id}"}],
+                            [{"text": "🎯 Установить", "callback_data": f"adm:user:bal:set:{profile_id}"}],
+                            [{"text": "⬅️ Назад", "callback_data": f"adm:user:open:{profile_id}"}]
+                        ]
+                        await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Balance add
+            elif data.startswith("adm:user:bal:add:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    profile_id = int(data.split(":")[4])
+                    admin_states[str(chat_id)] = {"state": "awaiting_amount", "action": "add", "user_id": profile_id, "message_id": msg_id}
+                    msg = f"➕ <b>Добавить к балансу #{profile_id}</b>\n\nВведите сумму в USDT:"
+                    buttons = [[{"text": "❌ Отмена", "callback_data": f"adm:user:bal:{profile_id}"}]]
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Balance subtract
+            elif data.startswith("adm:user:bal:sub:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    profile_id = int(data.split(":")[4])
+                    admin_states[str(chat_id)] = {"state": "awaiting_amount", "action": "subtract", "user_id": profile_id, "message_id": msg_id}
+                    msg = f"➖ <b>Списать с баланса #{profile_id}</b>\n\nВведите сумму в USDT:"
+                    buttons = [[{"text": "❌ Отмена", "callback_data": f"adm:user:bal:{profile_id}"}]]
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Balance set
+            elif data.startswith("adm:user:bal:set:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    profile_id = int(data.split(":")[4])
+                    admin_states[str(chat_id)] = {"state": "awaiting_amount", "action": "set", "user_id": profile_id, "message_id": msg_id}
+                    msg = f"🎯 <b>Установить баланс #{profile_id}</b>\n\nВведите новую сумму в USDT:"
+                    buttons = [[{"text": "❌ Отмена", "callback_data": f"adm:user:bal:{profile_id}"}]]
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Confirm balance change
+            elif data.startswith("adm:user:bal:confirm:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    parts = data.split(":")
+                    action = parts[4]
+                    profile_id = int(parts[5])
+                    amount = float(parts[6])
+                    
+                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                    if user:
+                        old_bal = user.balance_usdt or 0
+                        
+                        if action == "add":
+                            user.balance_usdt = old_bal + amount
+                            operation = f"Добавлено +{amount:.2f}"
+                        elif action == "subtract":
+                            if old_bal < amount:
+                                msg = f"❌ Недостаточно средств!\n\nТекущий баланс: {old_bal:.2f} USDT"
+                                buttons = [[{"text": "⬅️ Назад", "callback_data": f"adm:user:bal:{profile_id}"}]]
+                                await bot_edit_message(chat_id, msg_id, msg, buttons)
+                                return {"ok": True}
+                            user.balance_usdt = old_bal - amount
+                            operation = f"Списано -{amount:.2f}"
+                        else:
+                            user.balance_usdt = amount
+                            operation = f"Установлено {amount:.2f}"
+                        
+                        new_bal = user.balance_usdt
+                        await db.commit()
+                        await log_admin_action(db, str(ADMIN_ID), f"balance_{action}", user.id, f"{old_bal:.2f}", f"{new_bal:.2f}")
+                        
+                        try:
+                            if action == "add":
+                                await bot_send_message(int(user.telegram_id), f"💰 <b>Баланс пополнен!</b>\n\n✅ Зачислено: {amount:.2f} USDT\n💵 Новый баланс: {new_bal:.2f} USDT")
+                            elif action == "subtract":
+                                await bot_send_message(int(user.telegram_id), f"💸 <b>Списание с баланса</b>\n\n📉 Списано: {amount:.2f} USDT\n💵 Новый баланс: {new_bal:.2f} USDT")
+                        except: pass
+                        
+                        msg = f"✅ <b>Баланс изменен!</b>\n\n👤 Пользователь: #{profile_id}\n💰 Было: {old_bal:.2f} USDT\n📊 {operation} USDT\n💎 Стало: {new_bal:.2f} USDT"
+                        buttons = [[{"text": "⬅️ К профилю", "callback_data": f"adm:user:open:{profile_id}"}]]
+                        await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Write message to user
+            elif data.startswith("adm:user:msg:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    profile_id = int(data.split(":")[3])
+                    admin_states[str(chat_id)] = {"state": "awaiting_message", "user_id": profile_id, "message_id": msg_id}
+                    msg = f"💬 <b>Сообщение пользователю #{profile_id}</b>\n\nВведите текст сообщения:"
+                    buttons = [[{"text": "❌ Отмена", "callback_data": f"adm:user:open:{profile_id}"}]]
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Send message confirm
+            elif data.startswith("adm:user:msg:send:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    profile_id = int(data.split(":")[4])
+                    state = admin_states.get(str(chat_id), {})
+                    message_text = state.get("data", {}).get("message", "")
+                    
+                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                    if user and message_text:
+                        try:
+                            await bot_send_message(int(user.telegram_id), f"📨 <b>Сообщение от администрации:</b>\n\n{message_text}")
+                            await log_admin_action(db, str(ADMIN_ID), "send_message", user.id, None, message_text[:100])
+                            msg = f"✅ <b>Сообщение отправлено!</b>\n\n👤 Получатель: #{profile_id}\n📝 Текст: {message_text[:100]}..."
+                        except Exception as e:
+                            msg = f"❌ Ошибка отправки: {str(e)}"
+                    else:
+                        msg = "❌ Ошибка: текст сообщения не найден"
+                    
+                    admin_states.pop(str(chat_id), None)
+                    buttons = [[{"text": "⬅️ К профилю", "callback_data": f"adm:user:open:{profile_id}"}]]
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: User history
+            elif data.startswith("adm:user:history:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    profile_id = int(data.split(":")[3])
+                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                    if user:
+                        txns = (await db.execute(select(Transaction).where(Transaction.user_id == user.id).order_by(Transaction.created_at.desc()).limit(10))).scalars().all()
+                        
+                        msg = f"🧾 <b>История #{profile_id}</b>\n\n"
+                        if txns:
+                            for t in txns:
+                                emoji = "📥" if t.type == "deposit" else "📤" if t.type in ("withdrawal", "withdraw") else "🔄"
+                                date = t.created_at.strftime('%d.%m %H:%M') if t.created_at else "?"
+                                msg += f"{emoji} {t.type}: {t.amount:.2f} {t.currency} [{t.status}]\n   📅 {date}\n\n"
+                        else:
+                            msg += "Транзакций нет"
+                        
+                        buttons = [[{"text": "⬅️ К профилю", "callback_data": f"adm:user:open:{profile_id}"}]]
+                        await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Withdrawals menu
+            elif data == "adm:withdrawals:menu":
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    pending_count = (await db.execute(select(func.count(Withdrawal.id)).where(Withdrawal.status == "pending"))).scalar() or 0
+                    
+                    msg = f"💸 <b>Выводы</b>\n\n⏳ Ожидающие: {pending_count}"
+                    buttons = [
+                        [{"text": f"⏳ Ожидающие ({pending_count})", "callback_data": "adm:withdrawals:pending:1"}],
+                        [{"text": "📜 История", "callback_data": "adm:withdrawals:history:1"}],
+                        [{"text": "⬅️ Назад", "callback_data": "adm:menu"}]
+                    ]
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Pending withdrawals with pagination
+            elif data.startswith("adm:withdrawals:pending:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    page = int(data.split(":")[3])
+                    per_page = 5
+                    offset = (page - 1) * per_page
+                    
+                    total = (await db.execute(select(func.count(Withdrawal.id)).where(Withdrawal.status == "pending"))).scalar() or 0
+                    withdrawals = (await db.execute(select(Withdrawal).where(Withdrawal.status == "pending").order_by(Withdrawal.created_at.desc()).offset(offset).limit(per_page))).scalars().all()
+                    
+                    total_pages = max(1, (total + per_page - 1) // per_page)
+                    
+                    msg = f"⏳ <b>Ожидающие выводы</b> ({total})\n📄 Страница {page}/{total_pages}\n\n"
+                    
+                    buttons = []
+                    for w in withdrawals:
+                        user = (await db.execute(select(User).where(User.id == w.user_id))).scalars().first()
+                        username = user.username if user else "N/A"
+                        profile_id = user.profile_id if user else "?"
+                        msg += f"#{w.id} | #{profile_id} @{username}\n💰 {w.amount_rub:,.0f} ₽ → *{w.card_number}\n\n"
+                        buttons.append([
+                            {"text": f"✅ #{w.id}", "callback_data": f"adm:wd:approve:{w.id}"},
+                            {"text": f"❌ #{w.id}", "callback_data": f"adm:wd:reject:{w.id}"},
+                            {"text": f"👤", "callback_data": f"adm:user:open:{profile_id}"}
+                        ])
+                    
+                    if not withdrawals:
+                        msg += "✅ Нет ожидающих выводов"
+                    
+                    nav_row = []
+                    if page > 1:
+                        nav_row.append({"text": "◀️", "callback_data": f"adm:withdrawals:pending:{page-1}"})
+                    nav_row.append({"text": f"{page}/{total_pages}", "callback_data": "adm:noop"})
+                    if page < total_pages:
+                        nav_row.append({"text": "▶️", "callback_data": f"adm:withdrawals:pending:{page+1}"})
+                    if nav_row:
+                        buttons.append(nav_row)
+                    
+                    buttons.append([{"text": "⬅️ Назад", "callback_data": "adm:withdrawals:menu"}])
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Withdrawal history
+            elif data.startswith("adm:withdrawals:history:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    page = int(data.split(":")[3])
+                    per_page = 5
+                    offset = (page - 1) * per_page
+                    
+                    total = (await db.execute(select(func.count(Withdrawal.id)).where(Withdrawal.status != "pending"))).scalar() or 0
+                    withdrawals = (await db.execute(select(Withdrawal).where(Withdrawal.status != "pending").order_by(Withdrawal.created_at.desc()).offset(offset).limit(per_page))).scalars().all()
+                    
+                    total_pages = max(1, (total + per_page - 1) // per_page)
+                    
+                    msg = f"📜 <b>История выводов</b> ({total})\n📄 Страница {page}/{total_pages}\n\n"
+                    
+                    for w in withdrawals:
+                        user = (await db.execute(select(User).where(User.id == w.user_id))).scalars().first()
+                        profile_id = user.profile_id if user else "?"
+                        status_icon = "✅" if w.status == "completed" else "❌" if w.status == "cancelled" else "⏳"
+                        msg += f"{status_icon} #{w.id} | #{profile_id} | {w.amount_rub:,.0f} ₽ | {w.status}\n"
+                    
+                    if not withdrawals:
+                        msg += "История пуста"
+                    
+                    buttons = []
+                    nav_row = []
+                    if page > 1:
+                        nav_row.append({"text": "◀️", "callback_data": f"adm:withdrawals:history:{page-1}"})
+                    nav_row.append({"text": f"{page}/{total_pages}", "callback_data": "adm:noop"})
+                    if page < total_pages:
+                        nav_row.append({"text": "▶️", "callback_data": f"adm:withdrawals:history:{page+1}"})
+                    if nav_row:
+                        buttons.append(nav_row)
+                    
+                    buttons.append([{"text": "⬅️ Назад", "callback_data": "adm:withdrawals:menu"}])
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Approve withdrawal
+            elif data.startswith("adm:wd:approve:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    wd_id = int(data.split(":")[3])
+                    withdrawal = (await db.execute(select(Withdrawal).where(Withdrawal.id == wd_id))).scalars().first()
+                    if withdrawal and withdrawal.status == "pending":
+                        user = (await db.execute(select(User).where(User.id == withdrawal.user_id))).scalars().first()
+                        withdrawal.status = "completed"
+                        withdrawal.completed_at = datetime.utcnow()
+                        await db.commit()
+                        await log_admin_action(db, str(ADMIN_ID), "approve_withdrawal", withdrawal.user_id, f"pending", f"completed", details={"wd_id": wd_id, "amount": withdrawal.amount_rub})
+                        
+                        if user:
+                            try:
+                                await bot_send_message(int(user.telegram_id), f"✅ <b>Вывод одобрен!</b>\n\n💰 Сумма: {withdrawal.amount_rub:,.0f} ₽\n💳 На карту: **** {withdrawal.card_number}")
+                            except: pass
+                        
+                        msg = f"✅ <b>Вывод #{wd_id} одобрен!</b>"
+                    else:
+                        msg = "❌ Вывод не найден или уже обработан"
+                    
+                    buttons = [[{"text": "⬅️ К выводам", "callback_data": "adm:withdrawals:pending:1"}]]
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Reject withdrawal
+            elif data.startswith("adm:wd:reject:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    wd_id = int(data.split(":")[3])
+                    withdrawal = (await db.execute(select(Withdrawal).where(Withdrawal.id == wd_id))).scalars().first()
+                    if withdrawal and withdrawal.status == "pending":
+                        user = (await db.execute(select(User).where(User.id == withdrawal.user_id))).scalars().first()
+                        
+                        refund = withdrawal.usdt_required
+                        if user:
+                            user.balance_usdt = (user.balance_usdt or 0) + refund
+                        
+                        withdrawal.status = "cancelled"
+                        await db.commit()
+                        await log_admin_action(db, str(ADMIN_ID), "reject_withdrawal", withdrawal.user_id, f"pending", f"cancelled", details={"wd_id": wd_id, "refund": refund})
+                        
+                        if user:
+                            try:
+                                await bot_send_message(int(user.telegram_id), f"❌ <b>Вывод отклонен</b>\n\n💰 Сумма: {withdrawal.amount_rub:,.0f} ₽\n✅ {refund:.4f} USDT возвращены на баланс")
+                            except: pass
+                        
+                        msg = f"❌ <b>Вывод #{wd_id} отклонен!</b>\n✅ {refund:.4f} USDT возвращены"
+                    else:
+                        msg = "❌ Вывод не найден или уже обработан"
+                    
+                    buttons = [[{"text": "⬅️ К выводам", "callback_data": "adm:withdrawals:pending:1"}]]
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Statistics menu
+            elif data == "adm:stats:menu":
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    msg = "📊 <b>Статистика</b>\n\nВыберите период:"
+                    buttons = [
+                        [{"text": "📅 Сегодня", "callback_data": "adm:stats:today"}, {"text": "📆 Неделя", "callback_data": "adm:stats:week"}],
+                        [{"text": "🗓 Месяц", "callback_data": "adm:stats:month"}, {"text": "📈 Всё время", "callback_data": "adm:stats:all"}],
+                        [{"text": "⬅️ Назад", "callback_data": "adm:menu"}]
+                    ]
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Statistics by period
+            elif data.startswith("adm:stats:") and data.split(":")[2] in ["today", "week", "month", "all"]:
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    period = data.split(":")[2]
+                    
+                    now = datetime.utcnow()
+                    if period == "today":
+                        start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                        period_name = "Сегодня"
+                    elif period == "week":
+                        start_date = now - timedelta(days=7)
+                        period_name = "За неделю"
+                    elif period == "month":
+                        start_date = now - timedelta(days=30)
+                        period_name = "За месяц"
+                    else:
+                        start_date = datetime(2020, 1, 1)
+                        period_name = "Всё время"
+                    
+                    total_users = (await db.execute(select(func.count(User.id)))).scalar() or 0
+                    new_users = (await db.execute(select(func.count(User.id)).where(User.created_at >= start_date))).scalar() or 0
+                    
+                    total_deposits = (await db.execute(select(func.sum(Transaction.amount)).where(Transaction.type == "deposit", Transaction.status == "done", Transaction.created_at >= start_date))).scalar() or 0
+                    total_withdrawals = (await db.execute(select(func.sum(Withdrawal.amount_rub)).where(Withdrawal.status == "completed", Withdrawal.created_at >= start_date))).scalar() or 0
+                    
+                    total_trades = (await db.execute(select(func.count(Trade.id)).where(Trade.created_at >= start_date if hasattr(Trade, 'created_at') else Trade.opened_at >= start_date))).scalar() or 0
+                    active_trades = (await db.execute(select(func.count(Trade.id)).where(Trade.status == "active"))).scalar() or 0
+                    
+                    pending_wd = (await db.execute(select(func.count(Withdrawal.id)).where(Withdrawal.status == "pending"))).scalar() or 0
+                    
+                    msg = f"📊 <b>Статистика: {period_name}</b>\n\n"
+                    msg += f"👥 Всего пользователей: <b>{total_users}</b>\n"
+                    msg += f"🆕 Новых за период: <b>{new_users}</b>\n\n"
+                    msg += f"💰 Депозитов: <b>{total_deposits:.2f} USDT</b>\n"
+                    msg += f"💸 Выводов: <b>{total_withdrawals:,.0f} ₽</b>\n"
+                    msg += f"⏳ Ожидает вывода: <b>{pending_wd}</b>\n\n"
+                    msg += f"📈 Всего сделок: <b>{total_trades}</b>\n"
+                    msg += f"🔥 Активных: <b>{active_trades}</b>"
+                    
+                    buttons = [
+                        [{"text": "📅 Сегодня", "callback_data": "adm:stats:today"}, {"text": "📆 Неделя", "callback_data": "adm:stats:week"}],
+                        [{"text": "🗓 Месяц", "callback_data": "adm:stats:month"}, {"text": "📈 Всё время", "callback_data": "adm:stats:all"}],
+                        [{"text": "⬅️ Назад", "callback_data": "adm:menu"}]
+                    ]
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Broadcast menu
+            elif data == "adm:broadcast:menu":
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    total_users = (await db.execute(select(func.count(User.id)))).scalar() or 0
+                    
+                    msg = f"📣 <b>Рассылка</b>\n\n👥 Всего пользователей: {total_users}\n\nВведите текст сообщения для рассылки:"
+                    admin_states[str(chat_id)] = {"state": "awaiting_broadcast", "message_id": msg_id}
+                    buttons = [[{"text": "❌ Отмена", "callback_data": "adm:menu"}]]
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Broadcast confirm
+            elif data == "adm:broadcast:confirm":
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    state = admin_states.get(str(chat_id), {})
+                    broadcast_text = state.get("data", {}).get("message", "")
+                    
+                    if not broadcast_text:
+                        msg = "❌ Текст рассылки не найден"
+                        buttons = [[{"text": "⬅️ Назад", "callback_data": "adm:menu"}]]
+                        await bot_edit_message(chat_id, msg_id, msg, buttons)
+                        return {"ok": True}
+                    
+                    users = (await db.execute(select(User))).scalars().all()
+                    sent = 0
+                    failed = 0
+                    
+                    for user in users:
+                        try:
+                            await bot_send_message(int(user.telegram_id), f"📣 <b>Объявление:</b>\n\n{broadcast_text}")
+                            sent += 1
+                        except:
+                            failed += 1
+                    
+                    await log_admin_action(db, str(ADMIN_ID), "broadcast", None, None, broadcast_text[:100], details={"sent": sent, "failed": failed})
+                    admin_states.pop(str(chat_id), None)
+                    
+                    msg = f"✅ <b>Рассылка завершена!</b>\n\n📨 Отправлено: {sent}\n❌ Ошибок: {failed}"
+                    buttons = [[{"text": "⬅️ В меню", "callback_data": "adm:menu"}]]
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Management menu
+            elif data == "adm:manage:menu":
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    msg = "⚙️ <b>Управление</b>\n\nВыберите раздел:"
+                    buttons = [
+                        [{"text": "📒 Логи действий", "callback_data": "adm:logs:page:1"}],
+                        [{"text": "🎫 Чеки", "callback_data": "adm:checks:menu"}],
+                        [{"text": "⬅️ Назад", "callback_data": "adm:menu"}]
+                    ]
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Logs
+            elif data.startswith("adm:logs:page:"):
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    page = int(data.split(":")[3])
+                    per_page = 10
+                    offset = (page - 1) * per_page
+                    
+                    total = (await db.execute(select(func.count(AdminLog.id)))).scalar() or 0
+                    logs = (await db.execute(select(AdminLog).order_by(AdminLog.created_at.desc()).offset(offset).limit(per_page))).scalars().all()
+                    
+                    total_pages = max(1, (total + per_page - 1) // per_page)
+                    
+                    msg = f"📒 <b>Логи действий</b> ({total})\n📄 Страница {page}/{total_pages}\n\n"
+                    
+                    for log in logs:
+                        date = log.created_at.strftime('%d.%m %H:%M') if log.created_at else "?"
+                        user_info = f"User #{log.user_id}" if log.user_id else "System"
+                        msg += f"📌 {log.action} | {user_info}\n   📅 {date}\n"
+                    
+                    if not logs:
+                        msg += "Логов нет"
+                    
+                    buttons = []
+                    nav_row = []
+                    if page > 1:
+                        nav_row.append({"text": "◀️", "callback_data": f"adm:logs:page:{page-1}"})
+                    nav_row.append({"text": f"{page}/{total_pages}", "callback_data": "adm:noop"})
+                    if page < total_pages:
+                        nav_row.append({"text": "▶️", "callback_data": f"adm:logs:page:{page+1}"})
+                    if nav_row:
+                        buttons.append(nav_row)
+                    
+                    buttons.append([{"text": "⬅️ Назад", "callback_data": "adm:manage:menu"}])
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: Checks menu
+            elif data == "adm:checks:menu":
+                if str(chat_id) == str(ADMIN_ID):
+                    msg_id = cq["message"]["message_id"]
+                    active_checks = (await db.execute(select(func.count(Check.id)).where(Check.status == "active"))).scalar() or 0
+                    
+                    msg = f"🎫 <b>Управление чеками</b>\n\n✅ Активных чеков: {active_checks}\n\nИспользуйте команду:\n<code>/check_create СУММА</code>"
+                    buttons = [[{"text": "⬅️ Назад", "callback_data": "adm:manage:menu"}]]
+                    await bot_edit_message(chat_id, msg_id, msg, buttons)
+            
+            # Admin: No-op callback (for pagination display)
+            elif data == "adm:noop":
+                pass
+            
+            # ========== END NEW INLINE ADMIN PANEL CALLBACKS ==========
+            
+            # ========== LEGACY ADMIN USER MANAGEMENT CALLBACKS ==========
+            # Handle select_user callback - show user management options (legacy)
             elif data.startswith("select_user:"):
                 if str(chat_id) == str(ADMIN_ID):
                     profile_id = int(data.split(":")[1])
@@ -2645,13 +3317,13 @@ async def telegram_webhook(update: Dict[str,Any], db: AsyncSession=Depends(get_d
                             [{"text": "✅ Верификация", "callback_data": f"manage:verify:{profile_id}"}],
                             [{"text": "⭐ Premium", "callback_data": f"manage:premium:{profile_id}"}],
                             [{"text": block_btn_text, "callback_data": f"manage:block:{profile_id}"}],
-                            [{"text": "🔙 Назад", "callback_data": "admin:users"}]
+                            [{"text": "🔙 Назад", "callback_data": "adm:users:page:1"}]
                         ]
                         await bot_send_message(chat_id, msg, buttons, parse_mode="HTML")
                     else:
                         await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
             
-            # Handle admin:users callback - show users list
+            # Handle admin:users callback - show users list (legacy)
             elif data == "admin:users":
                 if str(chat_id) == str(ADMIN_ID):
                     users = (await db.execute(select(User).order_by(User.created_at.desc()).limit(10))).scalars().all()
@@ -2892,6 +3564,142 @@ We'll respond as quickly as possible! ⚡"""
             chat_id = msg.get("chat", {}).get("id")
             text = msg.get("text", "")
             
+            # ========== ADMIN FSM STATE HANDLER ==========
+            if str(chat_id) == str(ADMIN_ID) and str(chat_id) in admin_states and text and not text.startswith("/"):
+                state = admin_states[str(chat_id)]
+                state_type = state.get("state", "")
+                
+                # Handle search by ID
+                if state_type == "awaiting_search_id":
+                    try:
+                        search_id = int(text.strip())
+                        user = (await db.execute(select(User).where(User.profile_id == search_id))).scalars().first()
+                        if user:
+                            admin_states.pop(str(chat_id), None)
+                            verify_icon = "✅" if user.is_verified else "❌"
+                            premium_icon = "⭐" if user.is_premium else "❌"
+                            block_icon = "🚫" if user.is_blocked else "✅"
+                            displayed_bal = (user.balance_usdt or 0) + (user.virtual_balance or 0)
+                            
+                            msg_text = f"👤 <b>Пользователь #{search_id}</b>\n\n"
+                            msg_text += f"📛 Username: @{user.username or 'N/A'}\n"
+                            msg_text += f"💰 Баланс: {displayed_bal:.2f} USDT\n"
+                            msg_text += f"✅ Верификация: {verify_icon}\n"
+                            msg_text += f"⭐ Premium: {premium_icon}\n"
+                            msg_text += f"🔒 Статус: {block_icon}"
+                            
+                            block_btn = "✅ Разблокировать" if user.is_blocked else "🚫 Заблокировать"
+                            buttons = [
+                                [{"text": "💬 Написать", "callback_data": f"adm:user:msg:{search_id}"}, {"text": "💰 Баланс", "callback_data": f"adm:user:bal:{search_id}"}],
+                                [{"text": "⭐ Premium", "callback_data": f"adm:user:prem:{search_id}"}, {"text": "✅ Верификация", "callback_data": f"adm:user:verify:{search_id}"}],
+                                [{"text": block_btn, "callback_data": f"adm:user:block:{search_id}"}, {"text": "🧾 История", "callback_data": f"adm:user:history:{search_id}"}],
+                                [{"text": "⬅️ Назад", "callback_data": "adm:users:page:1"}]
+                            ]
+                            await bot_send_message(chat_id, msg_text, buttons, parse_mode="HTML")
+                        else:
+                            await bot_send_message(chat_id, f"❌ Пользователь с ID {search_id} не найден\n\nПопробуйте другой ID или нажмите Отмена")
+                    except ValueError:
+                        await bot_send_message(chat_id, "❌ Введите корректный числовой ID")
+                    return {"ok": True}
+                
+                # Handle message to user
+                elif state_type == "awaiting_message":
+                    profile_id = state.get("user_id")
+                    admin_states[str(chat_id)]["data"] = {"message": text}
+                    
+                    msg_text = f"💬 <b>Подтверждение отправки</b>\n\n👤 Получатель: #{profile_id}\n\n📝 <b>Текст:</b>\n{text}\n\nОтправить сообщение?"
+                    buttons = [
+                        [{"text": "✅ Отправить", "callback_data": f"adm:user:msg:send:{profile_id}"}],
+                        [{"text": "❌ Отмена", "callback_data": f"adm:user:open:{profile_id}"}]
+                    ]
+                    await bot_send_message(chat_id, msg_text, buttons, parse_mode="HTML")
+                    return {"ok": True}
+                
+                # Handle balance amount input
+                elif state_type == "awaiting_amount":
+                    try:
+                        amount = abs(float(text.strip().replace(",", ".")))
+                        profile_id = state.get("user_id")
+                        action = state.get("action")
+                        
+                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                        if not user:
+                            await bot_send_message(chat_id, "❌ Пользователь не найден")
+                            admin_states.pop(str(chat_id), None)
+                            return {"ok": True}
+                        
+                        current_bal = user.balance_usdt or 0
+                        
+                        if action == "add":
+                            new_bal = current_bal + amount
+                            action_text = f"➕ Добавить {amount:.2f} USDT"
+                        elif action == "subtract":
+                            if current_bal < amount:
+                                await bot_send_message(chat_id, f"❌ Недостаточно средств!\nТекущий баланс: {current_bal:.2f} USDT")
+                                return {"ok": True}
+                            new_bal = current_bal - amount
+                            action_text = f"➖ Списать {amount:.2f} USDT"
+                        else:
+                            new_bal = amount
+                            action_text = f"🎯 Установить {amount:.2f} USDT"
+                        
+                        msg_text = f"💰 <b>Подтверждение изменения баланса</b>\n\n"
+                        msg_text += f"👤 Пользователь: #{profile_id}\n"
+                        msg_text += f"💵 Текущий баланс: {current_bal:.2f} USDT\n"
+                        msg_text += f"📊 Действие: {action_text}\n"
+                        msg_text += f"💎 Новый баланс: {new_bal:.2f} USDT\n\n"
+                        msg_text += "Подтвердить изменение?"
+                        
+                        buttons = [
+                            [{"text": "✅ Подтвердить", "callback_data": f"adm:user:bal:confirm:{action}:{profile_id}:{amount}"}],
+                            [{"text": "❌ Отмена", "callback_data": f"adm:user:bal:{profile_id}"}]
+                        ]
+                        await bot_send_message(chat_id, msg_text, buttons, parse_mode="HTML")
+                    except ValueError:
+                        await bot_send_message(chat_id, "❌ Введите корректную сумму (число)")
+                    return {"ok": True}
+                
+                # Handle block reason input
+                elif state_type == "awaiting_reason":
+                    profile_id = state.get("user_id")
+                    reason = text.strip()
+                    
+                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+                    if user:
+                        old_val = f"not_blocked"
+                        user.is_blocked = True
+                        user.block_reason = reason
+                        await db.commit()
+                        await log_admin_action(db, str(ADMIN_ID), "block_user", user.id, old_val, f"blocked: {reason}")
+                        
+                        try:
+                            await bot_send_message(int(user.telegram_id), f"🚫 <b>Ваш аккаунт заблокирован</b>\n\n📝 Причина: {reason}")
+                        except: pass
+                        
+                        msg_text = f"🚫 <b>Пользователь #{profile_id} заблокирован</b>\n\n📝 Причина: {reason}"
+                    else:
+                        msg_text = "❌ Пользователь не найден"
+                    
+                    admin_states.pop(str(chat_id), None)
+                    buttons = [[{"text": "⬅️ К профилю", "callback_data": f"adm:user:open:{profile_id}"}]]
+                    await bot_send_message(chat_id, msg_text, buttons, parse_mode="HTML")
+                    return {"ok": True}
+                
+                # Handle broadcast text input
+                elif state_type == "awaiting_broadcast":
+                    admin_states[str(chat_id)]["data"] = {"message": text}
+                    total_users = (await db.execute(select(func.count(User.id)))).scalar() or 0
+                    
+                    msg_text = f"📣 <b>Подтверждение рассылки</b>\n\n👥 Получателей: {total_users}\n\n📝 <b>Текст:</b>\n{text}\n\nОтправить рассылку?"
+                    buttons = [
+                        [{"text": "✅ Отправить всем", "callback_data": "adm:broadcast:confirm"}],
+                        [{"text": "❌ Отмена", "callback_data": "adm:menu"}]
+                    ]
+                    await bot_send_message(chat_id, msg_text, buttons, parse_mode="HTML")
+                    return {"ok": True}
+            
+            # ========== END ADMIN FSM STATE HANDLER ==========
+            
             # Handle /start command - Main menu for admin or welcome for users
             if text.startswith("/start"):
                 # Extract referral code if present (format: /start REFCODE)
@@ -2930,29 +3738,26 @@ We'll respond as quickly as possible! ⚡"""
                 await bot_send_message(chat_id, welcome_text, reply_keyboard=reply_kb, parse_mode="HTML")
                 return {"ok": True}
             
-            # Handle /admin or /adminibot command - Admin panel with Reply Keyboard
+            # Handle /admin or /adminibot command - Admin panel with Inline Buttons
             elif text == "/admin" or text == "/adminibot" or text == "🔐 Админка":
                 print(f"[ADMIN] Command received. chat_id={chat_id}, ADMIN_ID={ADMIN_ID}, match={str(chat_id) == str(ADMIN_ID)}")
                 if str(chat_id) != str(ADMIN_ID):
                     await bot_send_message(chat_id, "❌ Доступ запрещен")
                     return {"ok": True}
+                
+                admin_states.pop(str(chat_id), None)
+                
                 admin_text = """🔐 <b>Админ панель Kraken</b>
 
 Добро пожаловать в панель управления!
-Используйте кнопки ниже для навигации.
-
-<b>Быстрые команды:</b>
-• /user ID - Информация о пользователе
-• /broadcast ТЕКСТ - Рассылка всем
-• /send_message ID ТЕКСТ - Сообщение пользователю"""
+Выберите раздел для управления:"""
                 
-                admin_keyboard = [
-                    [{"text": "👥 Пользователи"}, {"text": "💸 Выводы"}],
-                    [{"text": "📊 Статистика"}, {"text": "💰 Балансы"}],
-                    [{"text": "⚙️ Управление"}],
-                    [{"text": "🔙 Выйти из админки"}]
+                admin_buttons = [
+                    [{"text": "👥 Пользователи", "callback_data": "adm:users:page:1"}, {"text": "💸 Выводы", "callback_data": "adm:withdrawals:menu"}],
+                    [{"text": "📊 Статистика", "callback_data": "adm:stats:menu"}, {"text": "📣 Рассылка", "callback_data": "adm:broadcast:menu"}],
+                    [{"text": "⚙️ Управление", "callback_data": "adm:manage:menu"}, {"text": "⬅️ Выйти", "callback_data": "adm:exit"}]
                 ]
-                await bot_send_message(chat_id, admin_text, reply_keyboard=admin_keyboard, parse_mode="HTML")
+                await bot_send_message(chat_id, admin_text, admin_buttons, parse_mode="HTML")
                 return {"ok": True}
             
             # Admin keyboard: Users section
