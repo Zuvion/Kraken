@@ -2918,61 +2918,140 @@ We'll respond as quickly as possible! ⚡"""
 
 Используй кнопки ниже для навигации 👇"""
                 
-                # Reply keyboard (persistent buttons under input field) - same for all users
+                # Reply keyboard (persistent buttons under input field)
                 reply_kb = [
                     [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
                     [{"text": "💰 Баланс"}, {"text": "👥 Рефералы"}],
                     [{"text": "💬 Поддержка"}, {"text": "📊 История"}]
                 ]
+                # Add hidden admin button for admin user
+                if str(chat_id) == str(ADMIN_ID):
+                    reply_kb.append([{"text": "🔐 Админка"}])
                 await bot_send_message(chat_id, welcome_text, reply_keyboard=reply_kb, parse_mode="HTML")
                 return {"ok": True}
             
-            # Handle /admin or /adminibot command - Admin panel (text-based)
-            elif (text == "/admin" or text == "/adminibot") and str(chat_id) == str(ADMIN_ID):
+            # Handle /admin or /adminibot command - Admin panel with Reply Keyboard
+            elif (text == "/admin" or text == "/adminibot" or text == "🔐 Админка") and str(chat_id) == str(ADMIN_ID):
                 admin_text = """🔐 <b>Админ панель Kraken</b>
 
-<b>Доступные команды:</b>
-/users - Список пользователей
-/withdrawals - Ожидающие выводы
-/stats - Статистика
-/broadcast MESSAGE - Рассылка всем
-/user ID - Информация о пользователе
-/verify ID - Верификация пользователя
-/premium ID - Premium статус
-/block ID ПРИЧИНА - Заблокировать пользователя
-/unblock ID - Разблокировать пользователя
-/addbalance ID СУММА - Добавить баланс
-/setbalance ID СУММА - Установить баланс
-/send_message ID MESSAGE - Сообщение пользователю
+Добро пожаловать в панель управления!
+Используйте кнопки ниже для навигации.
 
-<b>Управление балансами:</b>
-/setdisplay ID СУММА - Установить отображаемый баланс
-/realbalance ID СУММА - Установить реальный баланс
-/virtualbalance ID СУММА - Установить виртуальный баланс
-/withdraw_silent ID СУММА - Тихое списание (без истории)
-/files - Скачать файлы проекта"""
-                await bot_send_message(chat_id, admin_text, parse_mode="HTML")
+<b>Быстрые команды:</b>
+• /user ID - Информация о пользователе
+• /broadcast ТЕКСТ - Рассылка всем
+• /send_message ID ТЕКСТ - Сообщение пользователю"""
+                
+                admin_keyboard = [
+                    [{"text": "👥 Пользователи"}, {"text": "💸 Выводы"}],
+                    [{"text": "📊 Статистика"}, {"text": "💰 Балансы"}],
+                    [{"text": "⚙️ Управление"}],
+                    [{"text": "🔙 Выйти из админки"}]
+                ]
+                await bot_send_message(chat_id, admin_text, reply_keyboard=admin_keyboard, parse_mode="HTML")
                 return {"ok": True}
             
-            # Handle /files command - Send project files to admin
-            elif text == "/files" and str(chat_id) == str(ADMIN_ID):
-                await bot_send_message(chat_id, "📦 Отправляю файлы проекта...")
-                files_to_send = [
-                    ("main.py", "🐍 Backend"),
-                    ("static/js/app.js", "⚡ Frontend JS"),
-                    ("static/css/style.css", "🎨 Styles"),
-                    ("templates/base.html", "📄 HTML Template"),
-                    ("railway.json", "🚂 Railway Config"),
-                    ("requirements.txt", "📋 Dependencies"),
-                    ("i18n/translations.json", "🌐 Translations")
+            # Admin keyboard: Users section
+            elif text == "👥 Пользователи" and str(chat_id) == str(ADMIN_ID):
+                users = (await db.execute(select(User).order_by(User.created_at.desc()).limit(10))).scalars().all()
+                total_users = (await db.execute(select(func.count(User.id)))).scalar()
+                
+                msg = f"👥 <b>Пользователи</b> (всего: {total_users})\n\n<b>Последние 10:</b>\n\n"
+                for u in users:
+                    status = ""
+                    if u.is_blocked: status += "🚫"
+                    if u.is_verified: status += "✅"
+                    if u.is_premium: status += "⭐"
+                    username = f"@{u.username}" if u.username else "Аноним"
+                    msg += f"#{u.profile_id} {username} - {u.balance_usdt:.2f}$ {status}\n"
+                
+                msg += "\n<b>Команды:</b>\n/user ID - Подробнее\n/verify ID - Верификация\n/premium ID - Premium\n/block ID ПРИЧИНА - Блок\n/unblock ID - Разблок"
+                await bot_send_message(chat_id, msg, parse_mode="HTML")
+                return {"ok": True}
+            
+            # Admin keyboard: Withdrawals section
+            elif text == "💸 Выводы" and str(chat_id) == str(ADMIN_ID):
+                pending = (await db.execute(select(Withdrawal).where(Withdrawal.status == "pending").order_by(Withdrawal.created_at.desc()))).scalars().all()
+                
+                if pending:
+                    msg = f"💸 <b>Ожидающие выводы</b> ({len(pending)})\n\n"
+                    for w in pending:
+                        user = (await db.execute(select(User).where(User.id == w.user_id))).scalars().first()
+                        username = f"@{user.username}" if user and user.username else "Аноним"
+                        profile_id = user.profile_id if user else "N/A"
+                        msg += f"#{w.id} | #{profile_id} {username}\n💰 {w.amount_rub:,.0f} ₽ → *{w.card_number}\n\n"
+                else:
+                    msg = "💸 <b>Выводы</b>\n\n✅ Нет ожидающих выводов"
+                
+                msg += "\n<b>Команды:</b>\n/withdrawals - Обновить список"
+                await bot_send_message(chat_id, msg, parse_mode="HTML")
+                return {"ok": True}
+            
+            # Admin keyboard: Statistics section
+            elif text == "📊 Статистика" and str(chat_id) == str(ADMIN_ID):
+                total_users = (await db.execute(select(func.count(User.id)))).scalar()
+                total_deposits = (await db.execute(select(func.sum(Transaction.amount)).where(Transaction.type == "deposit", Transaction.status == "done"))).scalar() or 0
+                total_withdrawals = (await db.execute(select(func.sum(Withdrawal.amount_rub)).where(Withdrawal.status == "completed"))).scalar() or 0
+                pending_withdrawals = (await db.execute(select(func.count(Withdrawal.id)).where(Withdrawal.status == "pending"))).scalar() or 0
+                active_trades = (await db.execute(select(func.count(Trade.id)).where(Trade.status == "active"))).scalar() or 0
+                
+                msg = f"""📊 <b>Статистика Kraken</b>
+
+👥 Пользователей: <b>{total_users}</b>
+💰 Всего депозитов: <b>{total_deposits:.2f} USDT</b>
+💸 Выведено: <b>{total_withdrawals:,.0f} ₽</b>
+⏳ Ожидает вывода: <b>{pending_withdrawals}</b>
+📈 Активных сделок: <b>{active_trades}</b>"""
+                await bot_send_message(chat_id, msg, parse_mode="HTML")
+                return {"ok": True}
+            
+            # Admin keyboard: Balance management section
+            elif text == "💰 Балансы" and str(chat_id) == str(ADMIN_ID):
+                msg = """💰 <b>Управление балансами</b>
+
+<b>Команды:</b>
+/setbalance ID СУММА - Установить общий баланс
+/addbalance ID СУММА - Добавить к балансу
+/setdisplay ID СУММА - Отображаемый баланс
+/realbalance ID СУММА - Реальный баланс
+/virtualbalance ID СУММА - Виртуальный баланс
+/withdraw_silent ID СУММА - Тихое списание
+
+<b>Пример:</b>
+<code>/setbalance 12345 100</code>
+<code>/addbalance 12345 50</code>"""
+                await bot_send_message(chat_id, msg, parse_mode="HTML")
+                return {"ok": True}
+            
+            # Admin keyboard: User management section
+            elif text == "⚙️ Управление" and str(chat_id) == str(ADMIN_ID):
+                msg = """⚙️ <b>Управление пользователями</b>
+
+<b>Команды:</b>
+/user ID - Информация о пользователе
+/verify ID - Верифицировать/снять верификацию
+/premium ID - Premium статус вкл/выкл
+/block ID ПРИЧИНА - Заблокировать
+/unblock ID - Разблокировать
+/send_message ID ТЕКСТ - Отправить сообщение
+/broadcast ТЕКСТ - Рассылка всем
+
+<b>Пример:</b>
+<code>/user 12345</code>
+<code>/block 12345 Нарушение правил</code>
+<code>/broadcast Важное обновление!</code>"""
+                await bot_send_message(chat_id, msg, parse_mode="HTML")
+                return {"ok": True}
+            
+            # Admin keyboard: Exit admin panel
+            elif text == "🔙 Выйти из админки" and str(chat_id) == str(ADMIN_ID):
+                reply_kb = [
+                    [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
+                    [{"text": "💰 Баланс"}, {"text": "👥 Рефералы"}],
+                    [{"text": "💬 Поддержка"}, {"text": "📊 История"}],
+                    [{"text": "🔐 Админка"}]
                 ]
-                sent = 0
-                for fpath, desc in files_to_send:
-                    if os.path.exists(fpath):
-                        result = await bot_send_document(chat_id, fpath, desc)
-                        if result.get("ok"):
-                            sent += 1
-                await bot_send_message(chat_id, f"✅ Отправлено {sent}/{len(files_to_send)} файлов")
+                await bot_send_message(chat_id, "🐙 <b>Главное меню Kraken</b>\n\nВы вышли из админ панели.", reply_keyboard=reply_kb, parse_mode="HTML")
                 return {"ok": True}
             
             # Handle /menu command - User main menu (same as /start but without referral check)
