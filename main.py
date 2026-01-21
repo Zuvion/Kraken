@@ -2931,7 +2931,11 @@ We'll respond as quickly as possible! ⚡"""
                 return {"ok": True}
             
             # Handle /admin or /adminibot command - Admin panel with Reply Keyboard
-            elif (text == "/admin" or text == "/adminibot" or text == "🔐 Админка") and str(chat_id) == str(ADMIN_ID):
+            elif text == "/admin" or text == "/adminibot" or text == "🔐 Админка":
+                print(f"[ADMIN] Command received. chat_id={chat_id}, ADMIN_ID={ADMIN_ID}, match={str(chat_id) == str(ADMIN_ID)}")
+                if str(chat_id) != str(ADMIN_ID):
+                    await bot_send_message(chat_id, "❌ Доступ запрещен")
+                    return {"ok": True}
                 admin_text = """🔐 <b>Админ панель Kraken</b>
 
 Добро пожаловать в панель управления!
