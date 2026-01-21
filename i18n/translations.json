@@ -135,7 +135,13 @@
     "exchange.rate": "Курс",
     "exchange.commission": "Комиссия",
     "exchange.you_receive": "Вы получите",
-    "exchange.confirm": "Подтвердить обмен"
+    "exchange.confirm": "Подтвердить обмен",
+    "trade.position_opened": "Позиция открыта",
+    "trade.position_closed": "Позиция закрыта",
+    "trade.status.active": "АКТИВНА",
+    "trade.status.win": "ПРИБЫЛЬ",
+    "trade.status.loss": "УБЫТОК",
+    "trade.status.push": "НИЧЬЯ"
   },
   "en": {
     "app.title": "Kraken",
@@ -273,6 +279,12 @@
     "exchange.rate": "Rate",
     "exchange.commission": "Commission",
     "exchange.you_receive": "You will receive",
-    "exchange.confirm": "Confirm Exchange"
+    "exchange.confirm": "Confirm Exchange",
+    "trade.position_opened": "Position Opened",
+    "trade.position_closed": "Position Closed",
+    "trade.status.active": "ACTIVE",
+    "trade.status.win": "WIN",
+    "trade.status.loss": "LOSS",
+    "trade.status.push": "PUSH"
   }
 }
