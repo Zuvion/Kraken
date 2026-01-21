@@ -77,15 +77,160 @@ if (tg) {
 }
 
 // -------- Splash Screen ----------
+const splashStatusMessages = [
+  { ru: 'Подключение к рынку...', en: 'Connecting to market...' },
+  { ru: 'Загрузка цен...', en: 'Loading prices...' },
+  { ru: 'Синхронизация данных...', en: 'Syncing candles...' },
+  { ru: 'Подготовка торговли...', en: 'Preparing trades...' },
+  { ru: 'Загрузка кошелька...', en: 'Loading wallet...' }
+];
+
+let splashStatusIndex = 0;
+let splashStatusInterval = null;
+let splashCanvasAnimation = null;
+
+function initSplashScreen() {
+  // Start status text rotation
+  const statusEl = document.getElementById('splashStatus');
+  if (statusEl) {
+    splashStatusInterval = setInterval(() => {
+      splashStatusIndex = (splashStatusIndex + 1) % splashStatusMessages.length;
+      const lang = i18n?.lang || 'ru';
+      statusEl.style.opacity = '0';
+      setTimeout(() => {
+        statusEl.textContent = splashStatusMessages[splashStatusIndex][lang] || splashStatusMessages[splashStatusIndex].en;
+        statusEl.style.opacity = '0.7';
+      }, 150);
+    }, 800);
+  }
+  
+  // Initialize canvas animation
+  initSplashCanvas();
+}
+
+function initSplashCanvas() {
+  const canvas = document.getElementById('splashCanvas');
+  if (!canvas) return;
+  
+  const ctx = canvas.getContext('2d');
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  
+  // Price line data
+  let pricePoints = [];
+  const pointCount = 60;
+  for (let i = 0; i < pointCount; i++) {
+    pricePoints.push({
+      x: (i / pointCount) * canvas.width,
+      y: canvas.height / 2 + Math.sin(i * 0.15) * 50 + Math.random() * 20
+    });
+  }
+  
+  let offset = 0;
+  let colorPhase = 0;
+  
+  function animate() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw grid
+    ctx.strokeStyle = 'rgba(240, 185, 11, 0.3)';
+    ctx.lineWidth = 0.5;
+    const gridSize = 40;
+    
+    for (let x = 0; x < canvas.width; x += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, canvas.height);
+      ctx.stroke();
+    }
+    for (let y = 0; y < canvas.height; y += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(canvas.width, y);
+      ctx.stroke();
+    }
+    
+    // Update price points
+    offset += 0.5;
+    colorPhase += 0.01;
+    
+    for (let i = 0; i < pointCount; i++) {
+      pricePoints[i].y = canvas.height / 2 + 
+        Math.sin((i + offset) * 0.1) * 60 + 
+        Math.sin((i + offset) * 0.05) * 30;
+    }
+    
+    // Draw price line with gradient color
+    const isGreen = Math.sin(colorPhase) > 0;
+    const lineColor = isGreen ? 'rgba(14, 203, 129, 0.6)' : 'rgba(246, 70, 93, 0.6)';
+    
+    ctx.strokeStyle = lineColor;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(pricePoints[0].x, pricePoints[0].y);
+    
+    for (let i = 1; i < pointCount; i++) {
+      const xc = (pricePoints[i].x + pricePoints[i - 1].x) / 2;
+      const yc = (pricePoints[i].y + pricePoints[i - 1].y) / 2;
+      ctx.quadraticCurveTo(pricePoints[i - 1].x, pricePoints[i - 1].y, xc, yc);
+    }
+    ctx.stroke();
+    
+    // Draw glow effect under line
+    ctx.strokeStyle = isGreen ? 'rgba(14, 203, 129, 0.2)' : 'rgba(246, 70, 93, 0.2)';
+    ctx.lineWidth = 8;
+    ctx.beginPath();
+    ctx.moveTo(pricePoints[0].x, pricePoints[0].y);
+    for (let i = 1; i < pointCount; i++) {
+      const xc = (pricePoints[i].x + pricePoints[i - 1].x) / 2;
+      const yc = (pricePoints[i].y + pricePoints[i - 1].y) / 2;
+      ctx.quadraticCurveTo(pricePoints[i - 1].x, pricePoints[i - 1].y, xc, yc);
+    }
+    ctx.stroke();
+    
+    splashCanvasAnimation = requestAnimationFrame(animate);
+  }
+  
+  animate();
+}
+
 function hideSplashScreen() {
   const splash = document.getElementById('splashScreen');
   if (splash) {
+    // Stop animations
+    if (splashStatusInterval) {
+      clearInterval(splashStatusInterval);
+      splashStatusInterval = null;
+    }
+    if (splashCanvasAnimation) {
+      cancelAnimationFrame(splashCanvasAnimation);
+      splashCanvasAnimation = null;
+    }
+    
     splash.classList.add('fade-out');
     setTimeout(() => {
       splash.style.display = 'none';
-    }, 600);
+    }, 350);
   }
 }
+
+function showSplashError() {
+  const statusEl = document.getElementById('splashStatus');
+  const errorEl = document.getElementById('splashError');
+  const progressEl = document.querySelector('.splash-progress');
+  
+  if (statusEl) statusEl.style.display = 'none';
+  if (progressEl) progressEl.style.display = 'none';
+  if (errorEl) errorEl.style.display = 'block';
+  
+  if (splashStatusInterval) {
+    clearInterval(splashStatusInterval);
+    splashStatusInterval = null;
+  }
+}
+
+// Initialize splash on load
+document.addEventListener('DOMContentLoaded', initSplashScreen);
 
 // -------- i18n ----------
 const i18n = { lang:'ru', dict:{} };
@@ -148,6 +293,211 @@ function setLang(lang, isManual = false){
 function toast(m){
   const el=document.getElementById('toast'); if(!el) return;
   el.textContent=m; el.classList.add('show'); setTimeout(()=>el.classList.remove('show'),3000);
+}
+
+// -------- Count-Up Animation ----------
+let balanceAnimated = false;
+function countUp(element, target, duration = 1000, decimals = 2) {
+  const start = 0;
+  const startTime = performance.now();
+  const easeOutQuad = t => t * (2 - t);
+  
+  function update(currentTime) {
+    const elapsed = currentTime - startTime;
+    const progress = Math.min(elapsed / duration, 1);
+    const easedProgress = easeOutQuad(progress);
+    const current = start + (target - start) * easedProgress;
+    
+    element.textContent = current.toFixed(decimals);
+    
+    if (progress < 1) {
+      requestAnimationFrame(update);
+    }
+  }
+  
+  requestAnimationFrame(update);
+}
+
+// -------- Skeleton Loading ----------
+function showAssetsSkeleton() {
+  const cont = document.getElementById('root');
+  cont.innerHTML = `
+    <div class="container">
+      <div class="balance-card">
+        <div class="skeleton skeleton-text" style="width:60px;height:12px;margin-bottom:8px"></div>
+        <div class="skeleton skeleton-balance"></div>
+        <div class="skeleton skeleton-balance-sub"></div>
+        <div style="display:flex;gap:8px;margin-top:16px">
+          <div class="skeleton" style="flex:1;height:40px"></div>
+          <div class="skeleton" style="flex:1;height:40px"></div>
+          <div class="skeleton" style="flex:1;height:40px"></div>
+        </div>
+      </div>
+      <div class="section">
+        <div class="section-header">
+          <div class="skeleton skeleton-text" style="width:100px"></div>
+        </div>
+      </div>
+      <div class="section">
+        <div class="section-header">
+          <div class="skeleton skeleton-text" style="width:120px"></div>
+        </div>
+        <div class="section-content">
+          <div class="wallet-grid">
+            <div class="skeleton skeleton-card"></div>
+            <div class="skeleton skeleton-card"></div>
+            <div class="skeleton skeleton-card"></div>
+            <div class="skeleton skeleton-card"></div>
+          </div>
+        </div>
+      </div>
+      <div class="section">
+        <div class="section-header">
+          <div class="skeleton skeleton-text" style="width:80px"></div>
+        </div>
+        <div class="section-content">
+          <div class="skeleton skeleton-row"></div>
+          <div class="skeleton skeleton-row"></div>
+          <div class="skeleton skeleton-row"></div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function showTradeSkeleton() {
+  const cont = document.getElementById('root');
+  cont.innerHTML = `
+    <div class="container">
+      <div class="section" style="padding:16px">
+        <div class="skeleton" style="width:100%;height:200px;margin-bottom:16px"></div>
+        <div style="display:flex;gap:8px;margin-bottom:16px">
+          <div class="skeleton" style="flex:1;height:44px"></div>
+          <div class="skeleton" style="flex:1;height:44px"></div>
+        </div>
+        <div class="skeleton" style="width:100%;height:48px;margin-bottom:8px"></div>
+        <div style="display:flex;gap:8px">
+          <div class="skeleton" style="flex:1;height:56px"></div>
+          <div class="skeleton" style="flex:1;height:56px"></div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// -------- Trade Result Notification System ----------
+function showTradeNotification(type, amount, pair) {
+  const existingToast = document.getElementById('tradeNotification');
+  if (existingToast) existingToast.remove();
+  
+  const isWin = type === 'win';
+  const icon = isWin ? '✓' : '✕';
+  const color = isWin ? '#0ECB81' : '#F6465D';
+  const bgColor = isWin ? 'rgba(14, 203, 129, 0.15)' : 'rgba(246, 70, 93, 0.15)';
+  const borderColor = isWin ? 'rgba(14, 203, 129, 0.4)' : 'rgba(246, 70, 93, 0.4)';
+  const sign = isWin ? '+' : '-';
+  const statusText = i18n.lang === 'ru' ? 'Позиция закрыта' : 'Position closed';
+  const resultText = isWin ? (i18n.lang === 'ru' ? 'ПРОФИТ' : 'WIN') : (i18n.lang === 'ru' ? 'УБЫТОК' : 'LOSS');
+  
+  const notification = document.createElement('div');
+  notification.id = 'tradeNotification';
+  notification.className = 'trade-notification';
+  notification.innerHTML = `
+    <div class="trade-notification-icon" style="background:${color}">${icon}</div>
+    <div class="trade-notification-content">
+      <div class="trade-notification-title">${statusText}</div>
+      <div class="trade-notification-result" style="color:${color}">
+        ${resultText} ${sign}${Math.abs(amount).toFixed(0)} USDT
+      </div>
+      ${pair ? `<div class="trade-notification-pair">${pair}</div>` : ''}
+    </div>
+  `;
+  notification.style.cssText = `
+    position:fixed;top:60px;left:50%;transform:translateX(-50%) translateY(-120%);
+    background:${bgColor};border:1px solid ${borderColor};border-radius:12px;
+    padding:14px 20px;display:flex;align-items:center;gap:14px;z-index:1000;
+    backdrop-filter:blur(10px);box-shadow:0 8px 32px rgba(0,0,0,0.4);
+    animation:tradeNotificationSlideIn 0.4s ease forwards;min-width:280px;
+  `;
+  
+  document.body.appendChild(notification);
+  
+  // Play sound effect (optional)
+  playTradeSound(isWin);
+  
+  // Auto dismiss after 4 seconds
+  setTimeout(() => {
+    notification.style.animation = 'tradeNotificationSlideOut 0.3s ease forwards';
+    setTimeout(() => notification.remove(), 300);
+  }, 4000);
+}
+
+// Sound effects for trade results
+function playTradeSound(isWin) {
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    
+    const audioCtx = new AudioContext();
+    const oscillator = audioCtx.createOscillator();
+    const gainNode = audioCtx.createGain();
+    
+    oscillator.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+    
+    if (isWin) {
+      // Win sound: ascending tone
+      oscillator.frequency.setValueAtTime(600, audioCtx.currentTime);
+      oscillator.frequency.exponentialRampToValueAtTime(900, audioCtx.currentTime + 0.1);
+      oscillator.type = 'sine';
+    } else {
+      // Loss sound: descending tone
+      oscillator.frequency.setValueAtTime(400, audioCtx.currentTime);
+      oscillator.frequency.exponentialRampToValueAtTime(200, audioCtx.currentTime + 0.15);
+      oscillator.type = 'sine';
+    }
+    
+    gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+    
+    oscillator.start(audioCtx.currentTime);
+    oscillator.stop(audioCtx.currentTime + 0.2);
+  } catch(e) {
+    // Sound not supported or blocked
+  }
+}
+
+// Calculation delay overlay
+function showCalculationOverlay() {
+  const existingOverlay = document.getElementById('calculationOverlay');
+  if (existingOverlay) existingOverlay.remove();
+  
+  const calcText = i18n.lang === 'ru' ? 'Расчёт позиции...' : 'Calculating position...';
+  
+  const overlay = document.createElement('div');
+  overlay.id = 'calculationOverlay';
+  overlay.innerHTML = `
+    <div class="calculation-modal">
+      <div class="calculation-spinner"></div>
+      <div class="calculation-text">${calcText}</div>
+    </div>
+  `;
+  overlay.style.cssText = `
+    position:fixed;inset:0;z-index:999;display:flex;align-items:center;
+    justify-content:center;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);
+    animation:fadeIn 0.2s ease;
+  `;
+  
+  document.body.appendChild(overlay);
+  return overlay;
+}
+
+function hideCalculationOverlay() {
+  const overlay = document.getElementById('calculationOverlay');
+  if (overlay) {
+    overlay.style.animation = 'fadeOut 0.2s ease forwards';
+    setTimeout(() => overlay.remove(), 200);
+  }
 }
 
 const CURRENCY_SYMBOLS = {
@@ -364,6 +714,10 @@ async function renderAssets(){
     restoreHeader(); // Restore original header
     setActive('assets');
     const cont=document.getElementById('root');
+    
+    // Show skeleton loading first
+    showAssetsSkeleton();
+    
     let user={ balance_usdt:0, wallets:{}, addresses:{}, profile_id:0, preferred_fiat:'RUB' };
     try{ user = await (await apiFetch('/api/user')).json(); }catch(e){ console.error('api/user failed',e); }
     
@@ -397,12 +751,55 @@ async function renderAssets(){
     const balanceInFiat = convertUsdToFiat(user.balance_usdt || 0, prefFiat);
     const minDepositFiat = getMinDepositInFiat(prefFiat);
 
+    let stats = { pnl_today: 0, pnl_total: 0, active_trades_count: 0, next_trade_seconds: null, wins_count: 0, losses_count: 0, total_trades: 0, telegram_id: null };
+    try { stats = await (await apiFetch('/api/stats')).json(); } catch(e) {}
+
+    const pnlTodayColor = stats.pnl_today >= 0 ? '#0ECB81' : '#F6465D';
+    const pnlTotalColor = stats.pnl_total >= 0 ? '#0ECB81' : '#F6465D';
+    const pnlTodaySign = stats.pnl_today >= 0 ? '+' : '';
+    const pnlTotalSign = stats.pnl_total >= 0 ? '+' : '';
+
+    let activeTradesHtml = '';
+    if (stats.active_trades_count > 0) {
+      activeTradesHtml = `
+        <div id="activeTradesAlert" style="display:flex;align-items:center;justify-content:center;gap:8px;margin-top:10px;padding:10px 14px;background:rgba(240,185,11,0.15);border:1px solid rgba(240,185,11,0.3);border-radius:8px;cursor:pointer">
+          <span style="font-size:14px">⚡</span>
+          <span style="font-size:13px;color:#F0B90B;font-weight:600">${i18n.lang === 'ru' ? 'Активных сделок' : 'Active trades'}: ${stats.active_trades_count}</span>
+        </div>`;
+      if (stats.next_trade_seconds !== null) {
+        activeTradesHtml += `
+        <div style="text-align:center;margin-top:6px;font-size:12px;color:#848E9C">
+          ${stats.active_trades_count === 1 ? (i18n.lang === 'ru' ? '1 сделка завершится через' : '1 trade closes in') : (i18n.lang === 'ru' ? 'Ближайшая через' : 'Next in')} <span style="color:#F0B90B;font-weight:600">${stats.next_trade_seconds}${i18n.lang === 'ru' ? 'с' : 's'}</span>
+        </div>`;
+      }
+    } else {
+      activeTradesHtml = `
+        <div style="text-align:center;margin-top:10px;font-size:12px;color:#5E6673">
+          ${i18n.lang === 'ru' ? 'У вас нет активных сделок' : 'No active trades'}
+        </div>`;
+    }
+
     cont.innerHTML = `
       <div class="container">
         <div class="balance-card">
           <div class="small">${t('common.balance')}</div>
-          <div class="balance-amount">${Number(user.balance_usdt||0).toFixed(2)} <span class="currency">${t('common.usdt')}</span></div>
+          <div class="balance-amount"><span id="balanceValue">${balanceAnimated ? Number(user.balance_usdt||0).toFixed(2) : '0.00'}</span> <span class="currency">${t('common.usdt')}</span></div>
           <div style="font-size:14px;color:#848E9C;margin-top:4px;font-family:monospace">≈ ${balanceInFiat.toLocaleString('ru-RU', {maximumFractionDigits: 2})} ${fiatSymbol}</div>
+          
+          <div style="display:flex;align-items:center;justify-content:center;gap:16px;margin-top:10px">
+            <div style="text-align:center">
+              <div style="font-size:11px;color:#848E9C;margin-bottom:2px">${i18n.lang === 'ru' ? 'Сегодня' : 'Today'}</div>
+              <div style="font-size:14px;color:${pnlTodayColor};font-weight:600">${pnlTodaySign}${stats.pnl_today.toFixed(2)} USDT</div>
+            </div>
+            <div style="width:1px;height:24px;background:#2B3139"></div>
+            <div style="text-align:center">
+              <div style="font-size:11px;color:#848E9C;margin-bottom:2px">${i18n.lang === 'ru' ? 'Всего' : 'Total'}</div>
+              <div style="font-size:14px;color:${pnlTotalColor};font-weight:600">${pnlTotalSign}${stats.pnl_total.toFixed(2)} USDT</div>
+            </div>
+          </div>
+          
+          ${activeTradesHtml}
+          
           <div id="rateIndicator" style="display:flex;align-items:center;justify-content:center;gap:8px;margin-top:12px;padding:8px 12px;background:rgba(240,185,11,0.1);border:1px solid rgba(240,185,11,0.2);border-radius:6px">
             <span style="font-size:12px;color:#F0B90B">📊</span>
             <span style="font-size:13px;color:#F0B90B;font-weight:600">1$ = ${fiatRate.toFixed(2)} ${fiatSymbol}</span>
@@ -411,6 +808,35 @@ async function renderAssets(){
             <button class="btn btn-primary" id="btnDeposit" data-i18n="btn.deposit">${t('btn.deposit')}</button>
             <button class="btn btn-purple" id="btnWithdraw" data-i18n="btn.withdraw">${t('btn.withdraw')}</button>
             <button class="btn btn-green" id="btnExchange" data-i18n="btn.exchange">${t('btn.exchange')}</button>
+          </div>
+        </div>
+
+        <div class="section" id="profileSection">
+          <div class="section-header" id="profileToggle" style="cursor:pointer">
+            <div style="display:flex;align-items:center;gap:10px">
+              <div class="section-title">${i18n.lang === 'ru' ? 'Профиль' : 'Profile'}</div>
+            </div>
+          </div>
+          <div class="section-content" id="profileContent">
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:#1E2329;border-radius:6px">
+                <span style="color:#848E9C;font-size:12px">ID ${i18n.lang === 'ru' ? 'аккаунта' : 'Account'}</span>
+                <span style="color:#EAECEF;font-size:13px;font-family:monospace;font-weight:600">${stats.telegram_id || TG_USER?.id || '—'}</span>
+              </div>
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:#1E2329;border-radius:6px">
+                <span style="color:#848E9C;font-size:12px">${i18n.lang === 'ru' ? 'Статистика' : 'Statistics'}</span>
+                <div style="display:flex;align-items:center;gap:4px;font-size:13px;font-weight:600">
+                  <span style="color:#0ECB81">${stats.wins_count || 0}</span>
+                  <span style="color:#5E6673">/</span>
+                  <span style="color:#F6465D">${stats.losses_count || 0}</span>
+                  <span style="color:#5E6673">/</span>
+                  <span style="color:#848E9C">${stats.total_trades || 0}</span>
+                </div>
+              </div>
+              <div style="padding:6px 12px;background:rgba(240,185,11,0.05);border-radius:4px">
+                <span style="color:#5E6673;font-size:10px">${i18n.lang === 'ru' ? 'Прибыльные / Убыточные / Всего' : 'Wins / Losses / Total'}</span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -467,9 +893,16 @@ async function renderAssets(){
       <button class="fab" id="fabSupport">Чат</button>`;
 
     // Свернуть/развернуть
+    document.getElementById('profileToggle').onclick = ()=> document.getElementById('profileContent').classList.toggle('hidden');
     document.getElementById('statusToggle').onclick  = ()=> document.getElementById('statusContent').classList.toggle('hidden');
     document.getElementById('walletsToggle').onclick = ()=> document.getElementById('walletsContent').classList.toggle('hidden');
     document.getElementById('histToggle').onclick    = ()=> document.getElementById('historyWrap').classList.toggle('hidden');
+    
+    // Active trades alert click handler - navigate to trade section
+    const activeTradesAlert = document.getElementById('activeTradesAlert');
+    if (activeTradesAlert) {
+      activeTradesAlert.onclick = () => { renderTrade(); };
+    }
 
     // Кошельки (10+) - загружаем цены для отображения
     const grid = document.getElementById('walletGrid');
@@ -484,32 +917,57 @@ async function renderAssets(){
     
     cryptoList.forEach(sym=>{
       const bal = sym==='USDT' ? user.balance_usdt : (user.wallets?.[sym] || 0);
-      const price = prices[sym] || (sym === 'USDT' ? 1 : 0);
+      const priceData = prices[sym] || (sym === 'USDT' ? {price: 1, change_24h: 0} : {price: 0, change_24h: 0});
+      const price = typeof priceData === 'object' ? priceData.price : priceData;
+      const change24h = typeof priceData === 'object' ? (priceData.change_24h || 0) : 0;
       const valueUSDT = bal * price;
       const hasBalance = bal > 0.0001;
       
+      const isPositive = change24h >= 0;
+      const changeColor = isPositive ? '#0ECB81' : '#F6465D';
+      const changeArrow = isPositive ? '↑' : '↓';
+      const changeText = `${isPositive ? '+' : ''}${change24h.toFixed(2)}%`;
+      const borderColor = sym === 'USDT' ? 'transparent' : changeColor;
+      
       const card = document.createElement('div');
       card.className='wallet-card';
-      card.style.cssText = hasBalance ? 'border-color:#F0B90B;background:rgba(240,185,11,0.03)' : '';
+      
+      let cardStyle = `border-left:3px solid ${borderColor};`;
+      if (hasBalance) {
+        cardStyle += 'border-color:#F0B90B;background:rgba(240,185,11,0.03);border-left:3px solid ' + borderColor + ';';
+      }
+      if (sym !== 'USDT') {
+        cardStyle += 'cursor:pointer;transition:all 0.2s ease;';
+      }
+      card.style.cssText = cardStyle;
       
       const logo = cryptoLogos[sym] || '';
       const logoHTML = logo ? `<img src="${logo}" style="width:20px;height:20px;border-radius:50%" onerror="this.style.display='none'"/>` : `<span style="font-size:14px">💰</span>`;
       
       const priceFormatted = sym === 'USDT' ? '$1.00' : `$${Number(price).toLocaleString('en-US', {minimumFractionDigits: price < 1 ? 4 : 2, maximumFractionDigits: price < 1 ? 4 : 2})}`;
       
+      const changeHTML = sym === 'USDT' ? '' : `<span style="font-size:10px;color:${changeColor};font-weight:600;margin-left:6px">${changeArrow} ${changeText}</span>`;
+      
       card.innerHTML = `
         <div class="wallet-top" style="margin-bottom:6px">
           <div style="display:flex;align-items:center;gap:8px">
             ${logoHTML}
             <div>
-              <div style="font-weight:600;font-size:13px;color:#EAECEF">${sym}</div>
+              <div style="font-weight:600;font-size:13px;color:#EAECEF">${sym}${changeHTML}</div>
               <div style="font-size:11px;color:#F0B90B;font-weight:500;font-family:monospace">${priceFormatted}</div>
             </div>
           </div>
         </div>
         <div class="wallet-balance" style="font-size:12px;font-weight:500;color:${hasBalance ? '#0ECB81' : '#848E9C'};font-family:monospace">${Number(bal||0).toFixed(sym==='USDT'?2:6)} ${sym}</div>
         ${hasBalance && sym !== 'USDT' ? `<div style="font-size:10px;color:#848E9C;margin-top:3px;font-family:monospace">≈ $${valueUSDT.toFixed(2)}</div>` : ''}`;
-      card.onclick = ()=>openWallet(sym);
+      
+      if (sym !== 'USDT') {
+        card.onmouseenter = () => { card.style.transform = 'translateY(-2px)'; card.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3)'; };
+        card.onmouseleave = () => { card.style.transform = 'translateY(0)'; card.style.boxShadow = 'none'; };
+        card.onclick = () => { renderTrade(sym + 'USDT'); };
+      } else {
+        card.onclick = () => openWallet(sym);
+      }
       grid.appendChild(card);
     });
 
@@ -614,6 +1072,15 @@ async function renderAssets(){
     document.getElementById('btnWithdraw').onclick = openWithdraw;
     document.getElementById('btnExchange').onclick = openExchange;
     document.getElementById('fabSupport').onclick = openSupport;
+    
+    // Animate balance on initial load
+    if (!balanceAnimated && user.balance_usdt > 0) {
+      const balanceEl = document.getElementById('balanceValue');
+      if (balanceEl) {
+        countUp(balanceEl, user.balance_usdt, 1000, 2);
+        balanceAnimated = true;
+      }
+    }
   }catch(e){
     console.error('renderAssets crash', e);
     toast('Ошибка загрузки Активов');
@@ -639,7 +1106,7 @@ async function openDeposit(){
       <div id="methodCards" style="display:flex;flex-direction:column;gap:12px">
         <div class="deposit-method-card" id="cryptoBotCard" style="background:#1E2329;border-radius:6px;padding:16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;border:1px solid transparent;transition:all 0.2s">
           <div style="display:flex;align-items:center;gap:14px">
-            <div style="width:48px;height:48px;border-radius:6px;background:linear-gradient(135deg,#2196F3,#1976D2);display:flex;align-items:center;justify-content:center;font-size:24px">🔷</div>
+            <img src="https://cryptobot.org/assets/images/logo.png" style="width:48px;height:48px;border-radius:50%" onerror="this.onerror=null;this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 48 48%22><circle cx=%2224%22 cy=%2224%22 r=%2224%22 fill=%22%232AABEE%22/><text x=%2224%22 y=%2232%22 font-size=%2228%22 fill=%22white%22 text-anchor=%22middle%22 font-family=%22Arial%22>@</text></svg>'"/>
             <div>
               <div style="font-weight:700;font-size:16px;color:#fff">${t('deposit.crypto_bot')}</div>
               <div style="font-size:13px;color:#848E9C;margin-top:2px">${t('deposit.crypto_bot_desc')}</div>
@@ -913,26 +1380,21 @@ async function openDeposit(){
       const data = await res.json();
       
       if (data.ok) {
-        if (data.pay_url) {
+        const invoiceId = data.invoice_id;
+        const payUrl = data.pay_url;
+        
+        if (payUrl) {
           if (tg && tg.openLink) {
-            tg.openLink(data.pay_url);
+            tg.openLink(payUrl);
           } else if (tg && tg.openTelegramLink) {
-            tg.openTelegramLink(data.pay_url);
+            tg.openTelegramLink(payUrl);
           } else {
-            window.open(data.pay_url, '_blank');
+            window.open(payUrl, '_blank');
           }
-          
-          toast(t('deposit.redirecting'));
-          
-          setTimeout(() => {
-            if (tg) tg.close();
-          }, 1000);
-        } else {
-          toast(t('toast.deposit_started'));
-          setTimeout(() => {
-            if (tg) tg.close();
-          }, 1500);
         }
+        
+        // Show polling status page
+        showDepositPolling(invoiceId, amount, currency);
       } else {
         toast(data.error || t('toast.error'));
       }
@@ -940,6 +1402,124 @@ async function openDeposit(){
       console.error('deposit error', e);
       toast(t('toast.error'));
     }
+  }
+  
+  // Deposit polling status page
+  function showDepositPolling(invoiceId, amount, currency) {
+    const waitingText = i18n.lang === 'ru' ? 'Ожидание оплаты...' : 'Waiting for payment...';
+    const amountText = i18n.lang === 'ru' ? 'Сумма' : 'Amount';
+    const statusText = i18n.lang === 'ru' ? 'Статус' : 'Status';
+    const checkingText = i18n.lang === 'ru' ? 'Проверяем оплату...' : 'Checking payment...';
+    const paidText = i18n.lang === 'ru' ? 'Оплачено!' : 'Paid!';
+    const creditedText = i18n.lang === 'ru' ? 'Зачислено на баланс' : 'Credited to balance';
+    const cancelText = i18n.lang === 'ru' ? 'Отмена' : 'Cancel';
+    const openPaymentText = i18n.lang === 'ru' ? 'Открыть оплату' : 'Open payment';
+    
+    cont.innerHTML = `
+    <div class="container" style="padding:16px">
+      <div style="text-align:center;padding:40px 20px">
+        <div id="depositSpinner" style="margin-bottom:24px">
+          <div style="width:80px;height:80px;margin:0 auto;border:3px solid #2B3139;border-top-color:#F0B90B;border-radius:50%;animation:spin 1s linear infinite"></div>
+        </div>
+        <div id="depositIcon" style="display:none;font-size:64px;margin-bottom:24px">✅</div>
+        
+        <h2 id="depositTitle" style="color:#EAECEF;margin-bottom:12px;font-size:20px">${waitingText}</h2>
+        <p id="depositStatus" style="color:#848E9C;font-size:14px;margin-bottom:24px">${checkingText}</p>
+        
+        <div style="background:#1E2329;border-radius:12px;padding:16px;margin-bottom:24px">
+          <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+            <span style="color:#848E9C">${amountText}</span>
+            <span style="color:#EAECEF;font-weight:600">${amount} ${currency}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between">
+            <span style="color:#848E9C">${statusText}</span>
+            <span id="paymentStatus" style="color:#F0B90B;font-weight:600">${checkingText}</span>
+          </div>
+        </div>
+        
+        <div style="display:flex;gap:12px">
+          <button class="btn" id="cancelDeposit" style="flex:1;background:#2B3139;padding:14px">${cancelText}</button>
+          <button class="btn btn-primary" id="openPayment" style="flex:1;padding:14px">${openPaymentText}</button>
+        </div>
+      </div>
+    </div>
+    <style>
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+    `;
+    
+    document.getElementById('cancelDeposit').onclick = () => {
+      clearInterval(pollInterval);
+      renderAssets();
+    };
+    
+    document.getElementById('openPayment').onclick = () => {
+      if (tg && tg.openLink) {
+        tg.openLink(`https://t.me/CryptoBot?start=IV${invoiceId}`);
+      } else {
+        window.open(`https://t.me/CryptoBot?start=IV${invoiceId}`, '_blank');
+      }
+    };
+    
+    // Poll every 5 seconds
+    let pollCount = 0;
+    const maxPolls = 120; // 10 minutes max
+    
+    const pollInterval = setInterval(async () => {
+      pollCount++;
+      if (pollCount > maxPolls) {
+        clearInterval(pollInterval);
+        document.getElementById('depositStatus').textContent = i18n.lang === 'ru' ? 'Время ожидания истекло' : 'Timeout';
+        return;
+      }
+      
+      try {
+        const res = await apiFetch(`/api/check_deposit?invoice_id=${invoiceId}`);
+        const data = await res.json();
+        
+        if (data.paid) {
+          clearInterval(pollInterval);
+          
+          // Show success
+          document.getElementById('depositSpinner').style.display = 'none';
+          document.getElementById('depositIcon').style.display = 'block';
+          document.getElementById('depositTitle').textContent = paidText;
+          document.getElementById('depositTitle').style.color = '#0ECB81';
+          document.getElementById('depositStatus').textContent = creditedText;
+          document.getElementById('paymentStatus').textContent = paidText;
+          document.getElementById('paymentStatus').style.color = '#0ECB81';
+          
+          toast(i18n.lang === 'ru' ? '✅ Депозит успешно зачислен!' : '✅ Deposit credited!');
+          
+          // Redirect to assets after 2 seconds
+          setTimeout(() => {
+            renderAssets();
+          }, 2000);
+        }
+      } catch (e) {
+        console.error('Poll error', e);
+      }
+    }, 5000);
+    
+    // Initial check
+    setTimeout(async () => {
+      try {
+        const res = await apiFetch(`/api/check_deposit?invoice_id=${invoiceId}`);
+        const data = await res.json();
+        if (data.paid) {
+          clearInterval(pollInterval);
+          document.getElementById('depositSpinner').style.display = 'none';
+          document.getElementById('depositIcon').style.display = 'block';
+          document.getElementById('depositTitle').textContent = paidText;
+          document.getElementById('depositTitle').style.color = '#0ECB81';
+          document.getElementById('depositStatus').textContent = creditedText;
+          document.getElementById('paymentStatus').textContent = paidText;
+          document.getElementById('paymentStatus').style.color = '#0ECB81';
+          toast(i18n.lang === 'ru' ? '✅ Депозит успешно зачислен!' : '✅ Deposit credited!');
+          setTimeout(() => renderAssets(), 2000);
+        }
+      } catch (e) {}
+    }, 1000);
   }
   
   // Step 2b: External wallet placeholder
@@ -1551,12 +2131,52 @@ async function openPair(pair, displayName = null){
     </div>
     
     <!-- TradingView Lightweight Chart (OKX Data) -->
-    <div id="price_chart" style="height:calc(50vh - 45px);width:100%;background:#0e1219;position:relative"></div>
+    <div id="price_chart" style="height:calc(50vh - 120px);width:100%;background:#0e1219;position:relative"></div>
+    
+    <!-- Trade Parameters Block -->
+    <div id="tradeParamsBlock" style="padding:12px 15px;background:#0e1219;border-top:1px solid #1f2937">
+      <!-- Amount Input Row -->
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <span style="color:#848E9C;font-size:12px;min-width:50px">${i18n.lang === 'ru' ? 'Сумма:' : 'Amount:'}</span>
+        <div style="flex:1;display:flex;align-items:center;background:#1f2937;border-radius:6px;padding:4px 8px">
+          <input type="number" id="quickAmount" value="100" min="5" step="10" 
+            style="flex:1;background:transparent;border:none;color:#F0B90B;font-size:16px;font-weight:700;font-family:monospace;outline:none;width:60px" />
+          <span style="color:#848E9C;font-size:12px;font-weight:600">USDT</span>
+        </div>
+      </div>
+      
+      <!-- Timer Selection Row -->
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;overflow-x:auto;scrollbar-width:none">
+        <span style="color:#848E9C;font-size:12px;min-width:50px">${i18n.lang === 'ru' ? 'Время:' : 'Timer:'}</span>
+        <div style="display:flex;gap:4px">
+          <button class="timer-btn" data-dur="30" style="padding:6px 10px;background:#1f2937;border:1px solid transparent;border-radius:4px;color:#9ca3af;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s;font-family:monospace">30с</button>
+          <button class="timer-btn active" data-dur="60" style="padding:6px 10px;background:#F0B90B;border:1px solid #F0B90B;border-radius:4px;color:#0B0E11;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s;font-family:monospace">1м</button>
+          <button class="timer-btn" data-dur="300" style="padding:6px 10px;background:#1f2937;border:1px solid transparent;border-radius:4px;color:#9ca3af;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s;font-family:monospace">5м</button>
+          <button class="timer-btn" data-dur="900" style="padding:6px 10px;background:#1f2937;border:1px solid transparent;border-radius:4px;color:#9ca3af;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s;font-family:monospace">15м</button>
+          <button class="timer-btn" data-dur="1800" style="padding:6px 10px;background:#1f2937;border:1px solid transparent;border-radius:4px;color:#9ca3af;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s;font-family:monospace">30м</button>
+        </div>
+      </div>
+      
+      <!-- Potential Profit Display -->
+      <div id="profitPreview" style="text-align:center;padding:6px 10px;background:rgba(14,203,129,0.1);border:1px solid rgba(14,203,129,0.3);border-radius:6px">
+        <span style="color:#848E9C;font-size:12px">${i18n.lang === 'ru' ? 'Ставка:' : 'Stake:'} </span>
+        <span id="stakeDisplay" style="color:#F0B90B;font-weight:700;font-family:monospace">100 USDT</span>
+        <span style="color:#848E9C;font-size:12px"> → </span>
+        <span style="color:#0ECB81;font-size:13px;font-weight:700">${i18n.lang === 'ru' ? 'Возможная прибыль:' : 'Potential profit:'} </span>
+        <span id="profitDisplay" style="color:#0ECB81;font-weight:700;font-family:monospace">+70 USDT</span>
+      </div>
+    </div>
     
     <!-- Кнопки купить/продать -->
-    <div style="padding:15px;display:flex;gap:10px">
-      <button class="btn btn-green" id="btnBuy" style="flex:1;font-size:16px;font-weight:600;padding:14px;border-radius:8px;transition:all 0.2s;box-shadow:0 2px 8px rgba(16,185,129,0.3)">${t('trade.buy')}</button>
-      <button class="btn btn-red" id="btnSell" style="flex:1;font-size:16px;font-weight:600;padding:14px;border-radius:8px;transition:all 0.2s;box-shadow:0 2px 8px rgba(239,68,68,0.3)">${t('trade.sell')}</button>
+    <div style="padding:10px 15px;display:flex;gap:10px">
+      <button class="btn btn-green" id="btnBuy" style="flex:1;font-size:15px;font-weight:700;padding:14px;border-radius:8px;transition:all 0.2s;box-shadow:0 2px 8px rgba(14,203,129,0.3);background:#0ECB81;font-family:monospace">
+        <span id="btnBuyText">${t('trade.buy')}</span>
+        <span id="btnBuyTimer" style="display:none;margin-left:4px"></span>
+      </button>
+      <button class="btn btn-red" id="btnSell" style="flex:1;font-size:15px;font-weight:700;padding:14px;border-radius:8px;transition:all 0.2s;box-shadow:0 2px 8px rgba(246,70,93,0.3);background:#F6465D;font-family:monospace">
+        <span id="btnSellText">${t('trade.sell')}</span>
+        <span id="btnSellTimer" style="display:none;margin-left:4px"></span>
+      </button>
     </div>
     
     <!-- Список сделок -->
@@ -1624,6 +2244,15 @@ async function openPair(pair, displayName = null){
       from { transform: translateY(100%); }
       to { transform: translateY(0); }
     }
+    @keyframes pulse-green {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(14, 203, 129, 0.7); }
+      50% { box-shadow: 0 0 0 8px rgba(14, 203, 129, 0); }
+    }
+    @keyframes pulse-red {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(246, 70, 93, 0.7); }
+      50% { box-shadow: 0 0 0 8px rgba(246, 70, 93, 0); }
+    }
+    .timer-btn:hover { border-color: #F0B90B !important; }
   </style>
   `;
   
@@ -1683,15 +2312,18 @@ async function openPair(pair, displayName = null){
       modalSubtitle.textContent = t('trade.modal.buying');
       modalTitle.textContent = coinName;
       modalConfirm.textContent = t('trade.buy');
-      modalConfirm.style.background = '#F0B90B';
+      modalConfirm.style.background = '#0ECB81';
     } else {
       modalSubtitle.textContent = t('trade.modal.selling');
       modalTitle.textContent = coinName;
       modalConfirm.textContent = t('trade.sell');
-      modalConfirm.style.background = '#ef4444';
+      modalConfirm.style.background = '#F6465D';
     }
     
-    modalAmount.value = '0';
+    // Use amount from quick input
+    const quickAmt = document.getElementById('quickAmount');
+    modalAmount.value = quickAmt ? quickAmt.value : '100';
+    
     loadUserBalance();
     tradeModal.style.display = 'block';
     
@@ -1712,6 +2344,131 @@ async function openPair(pair, displayName = null){
       selectedDuration = parseInt(chip.getAttribute('data-dur'));
     };
   });
+  
+  // Timer buttons logic (quick selection above BUY/SELL)
+  const timerBtns = document.querySelectorAll('.timer-btn');
+  timerBtns.forEach(btn => {
+    btn.onclick = () => {
+      timerBtns.forEach(b => {
+        b.style.background = '#1f2937';
+        b.style.border = '1px solid transparent';
+        b.style.color = '#9ca3af';
+        b.classList.remove('active');
+      });
+      btn.style.background = '#F0B90B';
+      btn.style.border = '1px solid #F0B90B';
+      btn.style.color = '#0B0E11';
+      btn.classList.add('active');
+      selectedDuration = parseInt(btn.getAttribute('data-dur'));
+      
+      // Sync with modal chips
+      document.querySelectorAll('#modalDurationChips .chip').forEach(c => {
+        c.classList.remove('active');
+        if (parseInt(c.getAttribute('data-dur')) === selectedDuration) {
+          c.classList.add('active');
+        }
+      });
+    };
+  });
+  
+  // Quick amount input and profit calculation
+  const quickAmountInput = document.getElementById('quickAmount');
+  const stakeDisplay = document.getElementById('stakeDisplay');
+  const profitDisplay = document.getElementById('profitDisplay');
+  const PAYOUT_RATE = 0.70; // 70% payout
+  
+  function updateProfitDisplay() {
+    const amount = parseFloat(quickAmountInput.value) || 0;
+    stakeDisplay.textContent = amount + ' USDT';
+    const profit = amount * PAYOUT_RATE;
+    profitDisplay.textContent = '+' + profit.toFixed(2) + ' USDT';
+  }
+  
+  quickAmountInput.oninput = updateProfitDisplay;
+  quickAmountInput.onchange = updateProfitDisplay;
+  
+  // Track active trades for this pair to update buttons
+  let activeTradeForPair = null;
+  let buttonTimerInterval = null;
+  
+  // Update BUY/SELL buttons based on active trades
+  async function updateButtonsWithActiveTrades() {
+    try {
+      const res = await apiFetch('/api/trade/active');
+      if (!res.ok) return;
+      const tradesData = await res.json();
+      const activeTrades = Array.isArray(tradesData) ? tradesData : (tradesData.trades || []);
+      
+      // Find active trade for current pair
+      const pairNormalized = pair.replace('-', '').replace('/', '');
+      const tradeForPair = activeTrades.find(t => 
+        t.pair.replace('-', '').replace('/', '') === pairNormalized && 
+        (t.is_active || t.status === 'active')
+      );
+      
+      const btnBuy = document.getElementById('btnBuy');
+      const btnSell = document.getElementById('btnSell');
+      const btnBuyText = document.getElementById('btnBuyText');
+      const btnSellText = document.getElementById('btnSellText');
+      const btnBuyTimer = document.getElementById('btnBuyTimer');
+      const btnSellTimer = document.getElementById('btnSellTimer');
+      
+      if (!btnBuy || !btnSell) return;
+      
+      if (tradeForPair) {
+        activeTradeForPair = tradeForPair;
+        const timeLeft = tradeForPair.time_left_sec || 0;
+        const mins = Math.floor(timeLeft / 60);
+        const secs = timeLeft % 60;
+        const timerText = `(${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')})`;
+        
+        if (tradeForPair.side === 'buy') {
+          btnBuyText.textContent = t('trade.buy');
+          btnBuyTimer.textContent = timerText;
+          btnBuyTimer.style.display = 'inline';
+          btnBuy.style.background = 'linear-gradient(135deg, #0ECB81, #0BA069)';
+          btnBuy.style.animation = 'pulse-green 1.5s infinite';
+          
+          btnSellText.textContent = t('trade.sell');
+          btnSellTimer.style.display = 'none';
+          btnSell.style.background = '#F6465D';
+          btnSell.style.animation = 'none';
+          btnSell.style.opacity = '0.5';
+        } else {
+          btnSellText.textContent = t('trade.sell');
+          btnSellTimer.textContent = timerText;
+          btnSellTimer.style.display = 'inline';
+          btnSell.style.background = 'linear-gradient(135deg, #F6465D, #D43850)';
+          btnSell.style.animation = 'pulse-red 1.5s infinite';
+          
+          btnBuyText.textContent = t('trade.buy');
+          btnBuyTimer.style.display = 'none';
+          btnBuy.style.background = '#0ECB81';
+          btnBuy.style.animation = 'none';
+          btnBuy.style.opacity = '0.5';
+        }
+      } else {
+        activeTradeForPair = null;
+        btnBuyText.textContent = t('trade.buy');
+        btnBuyTimer.style.display = 'none';
+        btnBuy.style.background = '#0ECB81';
+        btnBuy.style.animation = 'none';
+        btnBuy.style.opacity = '1';
+        
+        btnSellText.textContent = t('trade.sell');
+        btnSellTimer.style.display = 'none';
+        btnSell.style.background = '#F6465D';
+        btnSell.style.animation = 'none';
+        btnSell.style.opacity = '1';
+      }
+    } catch (e) {
+      console.error('Failed to update buttons:', e);
+    }
+  }
+  
+  // Initial update and interval
+  updateButtonsWithActiveTrades();
+  buttonTimerInterval = setInterval(updateButtonsWithActiveTrades, 1000);
   
   // Modal buttons
   modalBack.onclick = closeTradeModal;
@@ -1763,6 +2520,9 @@ async function openPair(pair, displayName = null){
     wickDownColor: '#F6465D',
   });
 
+  // Create entry price line series (horizontal dashed line for active trades)
+  let entryPriceLine = null;
+
   // Store markers for active trades
   let activeTradeMarkers = [];
   let isFirstChartLoad = true;
@@ -1798,17 +2558,21 @@ async function openPair(pair, displayName = null){
       // Update candlestick series
       candleSeries.setData(candleData);
 
-      // Load active trades for markers
+      // Load active trades for markers and entry price line
       try {
         const tradesRes = await apiFetch('/api/trade/active');
         if (!tradesRes.ok) throw new Error('API error');
         const tradesData = await tradesRes.json();
         const activeTrades = Array.isArray(tradesData) ? tradesData : (tradesData.trades || []);
         
+        // Filter trades for current pair
+        const pairNormalized = pair.replace('-', '').replace('/', '');
+        const tradesForPair = activeTrades.filter(t => 
+          t.pair.replace('-', '').replace('/', '') === pairNormalized
+        );
+        
         // Create markers for active trades
-        const markers = activeTrades
-          .filter(t => t.pair.replace('-', '').replace('/', '') === pair.replace('-', '').replace('/', ''))
-          .map(t => {
+        const markers = tradesForPair.map(t => {
             const tradeTime = Math.floor(new Date(t.entry_time).getTime() / 1000);
             const side = t.side === 'buy' ? '⬆️' : '⬇️';
             const color = t.side === 'buy' ? '#0ECB81' : '#F6465D';
@@ -1824,6 +2588,35 @@ async function openPair(pair, displayName = null){
 
         candleSeries.setMarkers(markers);
         activeTradeMarkers = markers;
+        
+        // Add entry price line for active trade
+        if (tradesForPair.length > 0 && tradesForPair[0].start_price) {
+          const activeTrade = tradesForPair[0];
+          const entryPrice = parseFloat(activeTrade.start_price);
+          const lineColor = activeTrade.side === 'buy' ? '#0ECB81' : '#F6465D';
+          const labelText = (i18n.lang === 'ru' ? 'Цена входа: $' : 'Entry: $') + entryPrice.toLocaleString('en-US', {maximumFractionDigits: 2});
+          
+          // Remove existing line if any
+          if (entryPriceLine) {
+            candleSeries.removePriceLine(entryPriceLine);
+          }
+          
+          // Create new price line
+          entryPriceLine = candleSeries.createPriceLine({
+            price: entryPrice,
+            color: lineColor,
+            lineWidth: 2,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: labelText,
+          });
+        } else {
+          // Remove line if no active trade
+          if (entryPriceLine) {
+            candleSeries.removePriceLine(entryPriceLine);
+            entryPriceLine = null;
+          }
+        }
       } catch (e) {
         console.error('Failed to load active trades:', e);
       }
@@ -1900,33 +2693,26 @@ async function openPair(pair, displayName = null){
   // Store previous trades to prevent flickering
   let previousTradesData = null;
   
-  // Load trades list
+  // Load trades list using new API with filtering
   async function loadTradesList(filter = 'active', currentPair = null) {
     try {
-      let trades = [];
+      // Use new /api/trades endpoint with status filter
+      const statusParam = filter === 'all' ? '' : `?status=${filter}`;
+      const res = await apiFetch(`/api/trades${statusParam}`);
+      if (!res.ok) throw new Error('API error');
+      const data = await res.json();
+      let trades = data.trades || [];
       
-      if (filter === 'active') {
-        const res = await apiFetch('/api/trade/active');
-        if (!res.ok) throw new Error('API error');
-        const data = await res.json();
-        trades = Array.isArray(data) ? data : (data.trades || []);
-      } else {
-        // Load all trades from stats
-        const res = await apiFetch('/api/stats');
-        if (!res.ok) throw new Error('API error');
-        const stats = await res.json();
-        trades = Array.isArray(stats.trades) ? stats.trades : [];
-      }
-      
-      // Filter by current pair if specified
+      // Filter by current pair if specified (optional)
       const filtered = currentPair 
         ? trades.filter(t => t.pair === currentPair)
         : trades;
       
       const listDiv = document.getElementById('tradesList');
+      if (!listDiv) return; // Element not on page (user navigated away)
       
       // Check if data changed to prevent flickering
-      const currentDataHash = JSON.stringify(filtered.map(t => ({ id: t.id, status: t.status, result: t.result })));
+      const currentDataHash = JSON.stringify(filtered.map(t => ({ id: t.id, status: t.status, result: t.result, time_left: t.time_left_sec })));
       if (currentDataHash === previousTradesData && listDiv.innerHTML !== '') {
         return; // No changes, skip update
       }
@@ -1941,33 +2727,122 @@ async function openPair(pair, displayName = null){
         const isBuy = trade.side === 'buy';
         const sideText = isBuy ? t('trade.side.buy') : t('trade.side.sell');
         const sideColor = isBuy ? '#0ECB81' : '#F6465D';
+        const sideIcon = isBuy ? '↑' : '↓';
+        const isActive = trade.is_active || trade.status === 'active';
         
-        // Calculate result
+        // Format prices (without $ for cleaner look)
+        const openPriceNum = trade.start_price ? Number(trade.start_price).toLocaleString('en-US', {maximumFractionDigits: 2}) : '-';
+        const closePriceNum = trade.close_price ? Number(trade.close_price).toLocaleString('en-US', {maximumFractionDigits: 2}) : '-';
+        
+        // Calculate result text and color
         let resultText = '';
         let resultColor = '#9ca3af';
-        if (trade.status === 'active') {
-          resultText = 'Активна';
+        let statusBadge = '';
+        let progressBarHtml = '';
+        
+        if (isActive) {
+          // Active trade with timer and progress bar
+          const timeLeft = trade.time_left_sec || 0;
+          const totalDuration = trade.duration_sec || 60;
+          const mins = Math.floor(timeLeft / 60);
+          const secs = timeLeft % 60;
+          resultText = `${mins}:${secs.toString().padStart(2, '0')}`;
+          
+          // Calculate progress percentage (remaining time)
+          const progressPercent = Math.max(0, Math.min(100, (timeLeft / totalDuration) * 100));
+          const progressColor = timeLeft <= 10 ? '#0ECB81' : '#F0B90B';
+          resultColor = timeLeft <= 10 ? '#0ECB81' : '#F0B90B';
+          
+          statusBadge = `<span style="background:${resultColor}20;color:${resultColor};padding:3px 8px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:0.5px">${t('trade.status.active')}</span>`;
+          
+          // Progress bar HTML
+          progressBarHtml = `
+            <div style="margin-top:6px;width:100%">
+              <div style="background:#2B3139;border-radius:2px;height:4px;overflow:hidden">
+                <div style="background:${progressColor};height:100%;width:${progressPercent}%;border-radius:2px;transition:width 1s linear,background 0.3s"></div>
+              </div>
+            </div>`;
         } else if (trade.result === 'win') {
-          resultText = `+${(trade.payout || 0).toFixed(1)} USDT`;
+          const profit = trade.payout || trade.amount_usdt * 0.8;
+          resultText = `+${profit.toFixed(0)} USDT`;
           resultColor = '#0ECB81';
+          statusBadge = `<span style="background:#0ECB8130;color:#0ECB81;padding:4px 10px;border-radius:4px;font-size:12px;font-weight:700;letter-spacing:0.5px">${t('trade.status.win')}</span>`;
+        } else if (trade.result === 'loss') {
+          resultText = `-${(trade.amount_usdt || 0).toFixed(0)} USDT`;
+          resultColor = '#F6465D';
+          statusBadge = `<span style="background:#F6465D30;color:#F6465D;padding:4px 10px;border-radius:4px;font-size:12px;font-weight:700;letter-spacing:0.5px">${t('trade.status.loss')}</span>`;
+        } else if (trade.result === 'push') {
+          resultText = `±0 USDT`;
+          resultColor = '#9ca3af';
+          statusBadge = `<span style="background:#9ca3af30;color:#9ca3af;padding:4px 10px;border-radius:4px;font-size:12px;font-weight:700;letter-spacing:0.5px">${t('trade.status.push')}</span>`;
         } else {
-          resultText = `-${(trade.amount_usdt || 0).toFixed(1)} USDT`;
+          resultText = `-${(trade.amount_usdt || 0).toFixed(0)} USDT`;
           resultColor = '#F6465D';
         }
         
         const tradeDate = new Date(trade.opened_at);
         const timeStr = tradeDate.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) + 
-                       ' ' + tradeDate.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' });
+                       ' ' + tradeDate.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
         
-        return `
-          <div style="display:flex;justify-content:space-between;align-items:center;padding:12px;background:#0e0e0e;border-radius:8px;margin-bottom:8px">
-            <div>
-              <div style="font-weight:700;font-size:15px;color:#fff">${trade.amount_usdt} USDT</div>
-              <div style="font-size:13px;color:${sideColor};margin-top:2px">${sideText}</div>
+        // Active trade card
+        if (isActive) {
+          return `
+            <div style="background:#0e1219;border-radius:10px;margin-bottom:10px;border-left:4px solid ${sideColor};overflow:hidden">
+              <div style="padding:14px 16px">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+                  <div>
+                    <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+                      <span style="font-weight:700;font-size:15px;color:#fff">${trade.pair}</span>
+                      <span style="font-size:14px;color:${sideColor}">${sideIcon}</span>
+                    </div>
+                    <div style="font-size:11px;color:#848E9C">${t('trade.position_opened')}</div>
+                  </div>
+                  ${statusBadge}
+                </div>
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                  <div>
+                    <div style="font-size:12px;color:${sideColor};font-weight:600;margin-bottom:2px">${sideText}</div>
+                    <div style="font-size:13px;color:#EAECEF;font-family:monospace">${trade.amount_usdt} USDT @ ${openPriceNum}</div>
+                  </div>
+                  <div style="text-align:right">
+                    <div style="font-weight:700;font-size:20px;color:${resultColor};font-family:monospace">${resultText}</div>
+                    <div style="font-size:10px;color:#848E9C;margin-top:2px">${timeStr}</div>
+                  </div>
+                </div>
+                ${progressBarHtml}
+              </div>
             </div>
-            <div style="text-align:right">
-              <div style="font-weight:700;font-size:15px;color:${resultColor}">${resultText}</div>
-              <div style="font-size:11px;color:#848E9C;margin-top:2px">${timeStr}</div>
+          `;
+        }
+        
+        // Closed trade card
+        return `
+          <div style="background:#0e1219;border-radius:10px;margin-bottom:10px;border-left:4px solid ${sideColor};overflow:hidden">
+            <div style="padding:14px 16px">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
+                <div>
+                  <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+                    <span style="font-weight:700;font-size:15px;color:#fff">${trade.pair}</span>
+                    <span style="font-size:14px;color:${sideColor}">${sideIcon}</span>
+                  </div>
+                  <div style="font-size:11px;color:#848E9C">${t('trade.position_closed')}</div>
+                </div>
+                ${statusBadge}
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:flex-end">
+                <div>
+                  <div style="font-size:12px;color:${sideColor};font-weight:600;margin-bottom:4px">${sideText} • ${trade.amount_usdt} USDT</div>
+                  <div style="display:flex;align-items:center;gap:6px">
+                    <span style="font-size:14px;color:#EAECEF;font-family:monospace;font-weight:500">${openPriceNum}</span>
+                    <span style="font-size:12px;color:#848E9C">→</span>
+                    <span style="font-size:14px;color:${resultColor};font-family:monospace;font-weight:500">${closePriceNum}</span>
+                  </div>
+                </div>
+                <div style="text-align:right">
+                  <div style="font-weight:700;font-size:22px;color:${resultColor};font-family:monospace">${resultText}</div>
+                  <div style="font-size:10px;color:#848E9C;margin-top:2px">${timeStr}</div>
+                </div>
+              </div>
             </div>
           </div>
         `;
@@ -1975,15 +2850,16 @@ async function openPair(pair, displayName = null){
       
     } catch (e) {
       console.error('Failed to load trades:', e);
-      document.getElementById('tradesList').innerHTML = '<div style="text-align:center;color:#ef4444;padding:20px">Ошибка загрузки</div>';
+      const errDiv = document.getElementById('tradesList');
+      if (errDiv) errDiv.innerHTML = '<div style="text-align:center;color:#ef4444;padding:20px">Ошибка загрузки</div>';
     }
   }
   
   // Initial load
   loadTradesList('active', pair);
   
-  // Auto-refresh trades list every 5 seconds
-  setInterval(() => loadTradesList(currentFilter, pair), 5000);
+  // Auto-refresh trades list every second for smooth timer countdown
+  setInterval(() => loadTradesList(currentFilter, pair), 1000);
 }
 async function placeOrder(pair, side, duration, amount){
   const amt = amount || 0;
@@ -1994,14 +2870,33 @@ async function placeOrder(pair, side, duration, amount){
     const data=await res.json();
     if(!data.ok){ toast(data.error||t('toast.error')); return; }
     const direction = side === 'buy' ? '⬆️ ВВЕРХ' : '⬇️ ВНИЗ';
-    toast(`Сделка открыта: ${direction} на ${dur/60} мин. Результат обновится автоматически.`);
+    const orderFilledText = i18n.lang === 'ru' ? 'Ордер исполнен' : 'Order filled';
+    toast(`${orderFilledText}: ${direction} ${dur >= 60 ? Math.floor(dur/60) + (i18n.lang === 'ru' ? ' мин' : ' min') : dur + (i18n.lang === 'ru' ? ' сек' : ' sec')}`);
     const id=data.order_id;
+    let hasShownResult = false;
     const intv=setInterval(async ()=>{
       try{
         const st=await (await apiFetch('/api/trade/order/'+id)).json();
-        if(st.status!=='active'){ clearInterval(intv); toast(st.result==='win'?'Профит +'+(st.payout||0)+' USDT':'Убыток -'+(st.amount_usdt||0)+' USDT'); renderAssets(); }
+        if(st.status!=='active' && !hasShownResult){ 
+          hasShownResult = true;
+          clearInterval(intv);
+          
+          // Show calculation delay overlay for 1.5 seconds
+          showCalculationOverlay();
+          
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          
+          hideCalculationOverlay();
+          
+          // Show trade result notification
+          const isWin = st.result === 'win';
+          const resultAmount = isWin ? (st.payout || 0) : (st.amount_usdt || 0);
+          showTradeNotification(st.result, resultAmount, pair);
+          
+          renderAssets(); 
+        }
       }catch(e){}
-    },5000);
+    },3000);
   }catch(e){ toast(t('toast.error')); }
 }
 
