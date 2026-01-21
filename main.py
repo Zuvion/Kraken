@@ -2523,6 +2523,8 @@ async def telegram_webhook(update: Dict[str,Any], db: AsyncSession=Depends(get_d
             cq=update["callback_query"]; data=cq.get("data",""); chat_id=cq["message"]["chat"]["id"]
             callback_id = cq.get("id")
             
+            print(f"[CALLBACK] User {chat_id} pressed: {data}")
+            
             # Answer callback to remove loading state from button
             await bot_answer_callback(callback_id)
             
@@ -2880,6 +2882,9 @@ We'll respond as quickly as possible! ⚡"""
                 await bot_send_message(chat_id, "🐙 <b>Главное меню Kraken</b>\n\nВыберите действие:", buttons, parse_mode="HTML")
             
             # ========== END USER MENU CALLBACKS ==========
+            
+            # Return OK after processing callback
+            return {"ok": True}
         
         # Handle regular messages from admin
         elif "message" in update:
