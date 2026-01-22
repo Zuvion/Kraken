@@ -3728,13 +3728,10 @@ We'll respond as quickly as possible! ⚡"""
                 
                 # Reply keyboard (persistent buttons under input field)
                 reply_kb = [
-                    [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
                     [{"text": "💰 Баланс"}, {"text": "👥 Рефералы"}],
-                    [{"text": "💬 Поддержка"}, {"text": "📊 История"}]
+                    [{"text": "💬 Поддержка"}, {"text": "📊 История"}],
+                    [{"text": "📈 Курсы"}, {"text": "ℹ️ О боте"}]
                 ]
-                # Add hidden admin button for admin user
-                if str(chat_id) == str(ADMIN_ID):
-                    reply_kb.append([{"text": "🔐 Админка"}])
                 await bot_send_message(chat_id, welcome_text, reply_keyboard=reply_kb, parse_mode="HTML")
                 return {"ok": True}
             
@@ -3760,105 +3757,12 @@ We'll respond as quickly as possible! ⚡"""
                 await bot_send_message(chat_id, admin_text, admin_buttons, parse_mode="HTML")
                 return {"ok": True}
             
-            # Admin keyboard: Users section
-            elif text == "👥 Пользователи" and str(chat_id) == str(ADMIN_ID):
-                users = (await db.execute(select(User).order_by(User.created_at.desc()).limit(10))).scalars().all()
-                total_users = (await db.execute(select(func.count(User.id)))).scalar()
-                
-                msg = f"👥 <b>Пользователи</b> (всего: {total_users})\n\n<b>Последние 10:</b>\n\n"
-                for u in users:
-                    status = ""
-                    if u.is_blocked: status += "🚫"
-                    if u.is_verified: status += "✅"
-                    if u.is_premium: status += "⭐"
-                    username = f"@{u.username}" if u.username else "Аноним"
-                    msg += f"#{u.profile_id} {username} - {u.balance_usdt:.2f}$ {status}\n"
-                
-                msg += "\n<b>Команды:</b>\n/user ID - Подробнее\n/verify ID - Верификация\n/premium ID - Premium\n/block ID ПРИЧИНА - Блок\n/unblock ID - Разблок"
-                await bot_send_message(chat_id, msg, parse_mode="HTML")
-                return {"ok": True}
-            
-            # Admin keyboard: Withdrawals section
-            elif text == "💸 Выводы" and str(chat_id) == str(ADMIN_ID):
-                pending = (await db.execute(select(Withdrawal).where(Withdrawal.status == "pending").order_by(Withdrawal.created_at.desc()))).scalars().all()
-                
-                if pending:
-                    msg = f"💸 <b>Ожидающие выводы</b> ({len(pending)})\n\n"
-                    for w in pending:
-                        user = (await db.execute(select(User).where(User.id == w.user_id))).scalars().first()
-                        username = f"@{user.username}" if user and user.username else "Аноним"
-                        profile_id = user.profile_id if user else "N/A"
-                        msg += f"#{w.id} | #{profile_id} {username}\n💰 {w.amount_rub:,.0f} ₽ → *{w.card_number}\n\n"
-                else:
-                    msg = "💸 <b>Выводы</b>\n\n✅ Нет ожидающих выводов"
-                
-                msg += "\n<b>Команды:</b>\n/withdrawals - Обновить список"
-                await bot_send_message(chat_id, msg, parse_mode="HTML")
-                return {"ok": True}
-            
-            # Admin keyboard: Statistics section
-            elif text == "📊 Статистика" and str(chat_id) == str(ADMIN_ID):
-                total_users = (await db.execute(select(func.count(User.id)))).scalar()
-                total_deposits = (await db.execute(select(func.sum(Transaction.amount)).where(Transaction.type == "deposit", Transaction.status == "done"))).scalar() or 0
-                total_withdrawals = (await db.execute(select(func.sum(Withdrawal.amount_rub)).where(Withdrawal.status == "completed"))).scalar() or 0
-                pending_withdrawals = (await db.execute(select(func.count(Withdrawal.id)).where(Withdrawal.status == "pending"))).scalar() or 0
-                active_trades = (await db.execute(select(func.count(Trade.id)).where(Trade.status == "active"))).scalar() or 0
-                
-                msg = f"""📊 <b>Статистика Kraken</b>
-
-👥 Пользователей: <b>{total_users}</b>
-💰 Всего депозитов: <b>{total_deposits:.2f} USDT</b>
-💸 Выведено: <b>{total_withdrawals:,.0f} ₽</b>
-⏳ Ожидает вывода: <b>{pending_withdrawals}</b>
-📈 Активных сделок: <b>{active_trades}</b>"""
-                await bot_send_message(chat_id, msg, parse_mode="HTML")
-                return {"ok": True}
-            
-            # Admin keyboard: Balance management section
-            elif text == "💰 Балансы" and str(chat_id) == str(ADMIN_ID):
-                msg = """💰 <b>Управление балансами</b>
-
-<b>Команды:</b>
-/setbalance ID СУММА - Установить общий баланс
-/addbalance ID СУММА - Добавить к балансу
-/setdisplay ID СУММА - Отображаемый баланс
-/realbalance ID СУММА - Реальный баланс
-/virtualbalance ID СУММА - Виртуальный баланс
-/withdraw_silent ID СУММА - Тихое списание
-
-<b>Пример:</b>
-<code>/setbalance 12345 100</code>
-<code>/addbalance 12345 50</code>"""
-                await bot_send_message(chat_id, msg, parse_mode="HTML")
-                return {"ok": True}
-            
-            # Admin keyboard: User management section
-            elif text == "⚙️ Управление" and str(chat_id) == str(ADMIN_ID):
-                msg = """⚙️ <b>Управление пользователями</b>
-
-<b>Команды:</b>
-/user ID - Информация о пользователе
-/verify ID - Верифицировать/снять верификацию
-/premium ID - Premium статус вкл/выкл
-/block ID ПРИЧИНА - Заблокировать
-/unblock ID - Разблокировать
-/send_message ID ТЕКСТ - Отправить сообщение
-/broadcast ТЕКСТ - Рассылка всем
-
-<b>Пример:</b>
-<code>/user 12345</code>
-<code>/block 12345 Нарушение правил</code>
-<code>/broadcast Важное обновление!</code>"""
-                await bot_send_message(chat_id, msg, parse_mode="HTML")
-                return {"ok": True}
-            
-            # Admin keyboard: Exit admin panel
+            # Admin keyboard: Exit admin panel (legacy support)
             elif text == "🔙 Выйти из админки" and str(chat_id) == str(ADMIN_ID):
                 reply_kb = [
-                    [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
                     [{"text": "💰 Баланс"}, {"text": "👥 Рефералы"}],
                     [{"text": "💬 Поддержка"}, {"text": "📊 История"}],
-                    [{"text": "🔐 Админка"}]
+                    [{"text": "📈 Курсы"}, {"text": "ℹ️ О боте"}]
                 ]
                 await bot_send_message(chat_id, "🐙 <b>Главное меню Kraken</b>\n\nВы вышли из админ панели.", reply_keyboard=reply_kb, parse_mode="HTML")
                 return {"ok": True}
@@ -3872,9 +3776,9 @@ We'll respond as quickly as possible! ⚡"""
                 
                 # Reply keyboard (persistent buttons under input field) - same for all users
                 reply_kb = [
-                    [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
                     [{"text": "💰 Баланс"}, {"text": "👥 Рефералы"}],
-                    [{"text": "💬 Поддержка"}, {"text": "📊 История"}]
+                    [{"text": "💬 Поддержка"}, {"text": "📊 История"}],
+                    [{"text": "📈 Курсы"}, {"text": "ℹ️ О боте"}]
                 ]
                 await bot_send_message(chat_id, "🐙 <b>Главное меню Kraken</b>\n\nВыберите действие:", reply_keyboard=reply_kb, parse_mode="HTML")
                 return {"ok": True}
@@ -3984,6 +3888,53 @@ We'll respond as quickly as possible! ⚡"""
                 await bot_send_message(chat_id, msg_text, parse_mode="HTML")
                 return {"ok": True}
             
+            # Handle "📈 Курсы" button - Show current crypto prices
+            elif text == "📈 Курсы":
+                try:
+                    prices_text = "📈 <b>Текущие курсы криптовалют</b>\n\n"
+                    symbols = ["BTC", "ETH", "TON", "SOL", "BNB", "XRP", "DOGE", "LTC", "TRX"]
+                    
+                    async with aiohttp.ClientSession() as session:
+                        for sym in symbols:
+                            try:
+                                url = f"https://www.okx.com/api/v5/market/ticker?instId={sym}-USDT"
+                                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                                    if resp.status == 200:
+                                        data = await resp.json()
+                                        if data.get("data"):
+                                            price = float(data["data"][0].get("last", 0))
+                                            change = float(data["data"][0].get("changeUtc24h", 0)) * 100
+                                            arrow = "🟢" if change >= 0 else "🔴"
+                                            prices_text += f"{arrow} <b>{sym}</b>: ${price:,.2f} ({change:+.2f}%)\n"
+                            except:
+                                continue
+                    
+                    prices_text += "\n<i>Данные: OKX</i>"
+                    await bot_send_message(chat_id, prices_text, parse_mode="HTML")
+                except Exception as e:
+                    await bot_send_message(chat_id, "❌ Ошибка загрузки курсов. Попробуйте позже.")
+                return {"ok": True}
+            
+            # Handle "ℹ️ О боте" button - Show bot info
+            elif text == "ℹ️ О боте":
+                about_text = """🐙 <b>Kraken — торговая платформа</b>
+
+<b>Возможности:</b>
+• 💰 Пополнение через CryptoBot (USDT)
+• 📊 Трейдинг криптовалют
+• 💱 Обмен валют по курсу OKX
+• 👥 Реферальная программа (5% бонус)
+• 💸 Вывод на карту
+
+<b>Поддерживаемые криптовалюты:</b>
+BTC, ETH, TON, SOL, BNB, XRP, DOGE, LTC, TRX, USDT
+
+<b>Техподдержка:</b>
+Нажмите кнопку "💬 Поддержка" для связи с оператором.
+
+<i>© 2025 Kraken Trading</i>"""
+                await bot_send_message(chat_id, about_text, parse_mode="HTML")
+                return {"ok": True}
             
             # Handle /balance command - Set user REAL balance
             elif text.startswith("/balance ") and str(chat_id) == str(ADMIN_ID):
@@ -4504,7 +4455,7 @@ We'll respond as quickly as possible! ⚡"""
                             
                             # Send via Telegram
                             try:
-                                await bot_send_message(int(user.telegram_id), f"📨 <b>Сообщение от администратора:</b>\n\n{message_text}", parse_mode="HTML")
+                                await bot_send_message(int(user.telegram_id), message_text, parse_mode="HTML")
                                 user_display = format_user_display(user)
                                 await bot_send_message(chat_id, f"✅ Сообщение отправлено пользователю {user_display}")
                             except Exception as e:
@@ -4535,7 +4486,7 @@ We'll respond as quickly as possible! ⚡"""
                     
                     for user in users:
                         try:
-                            await bot_send_message(int(user.telegram_id), f"📨 <b>Важное сообщение:</b>\n\n{message_text}", parse_mode="HTML")
+                            await bot_send_message(int(user.telegram_id), message_text, parse_mode="HTML")
                             sent_count += 1
                         except:
                             pass
@@ -4643,7 +4594,7 @@ We'll respond as quickly as possible! ⚡"""
                             await db.commit()
                             
                             try:
-                                await bot_send_message(int(user.telegram_id), f"📨 <b>Сообщение от администратора:</b>\n\n{message_text}", parse_mode="HTML")
+                                await bot_send_message(int(user.telegram_id), message_text, parse_mode="HTML")
                                 user_display = format_user_display(user)
                                 await bot_send_message(chat_id, f"✅ Сообщение отправлено пользователю {user_display}")
                             except Exception as e:
@@ -4666,7 +4617,7 @@ We'll respond as quickly as possible! ⚡"""
                         # Send to each user via Telegram
                         for user in users:
                             try:
-                                await bot_send_message(int(user.telegram_id), f"📨 <b>Важное сообщение:</b>\n\n{message_text}", parse_mode="HTML")
+                                await bot_send_message(int(user.telegram_id), message_text, parse_mode="HTML")
                                 sent_count += 1
                             except:
                                 pass
@@ -4694,7 +4645,7 @@ We'll respond as quickly as possible! ⚡"""
                             
                             # Send via Telegram
                             try:
-                                await bot_send_message(int(user.telegram_id), f"📨 <b>Важное сообщение:</b>\n\n{message_text}", parse_mode="HTML")
+                                await bot_send_message(int(user.telegram_id), message_text, parse_mode="HTML")
                                 sent_count += 1
                             except:
                                 pass
