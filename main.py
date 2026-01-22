@@ -3433,7 +3433,6 @@ async def telegram_webhook(update: Dict[str,Any], db: AsyncSession=Depends(get_d
 
 Откройте приложение для пополнения или вывода средств 👇"""
                     buttons = [
-                        [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
                         [{"text": "🔙 Назад", "callback_data": "user:menu"}]
                     ]
                 else:
@@ -3511,7 +3510,6 @@ We'll respond as quickly as possible! ⚡"""
 
 Мы ответим как можно быстрее! ⚡"""
                 buttons = [
-                    [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
                     [{"text": "🔙 Назад", "callback_data": "user:menu"}]
                 ]
                 await bot_send_message(chat_id, text, buttons, parse_mode="HTML")
@@ -3535,7 +3533,6 @@ We'll respond as quickly as possible! ⚡"""
                         text = "📊 <b>История транзакций</b>\n\nУ вас пока нет транзакций."
                     
                     buttons = [
-                        [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
                         [{"text": "🔙 Назад", "callback_data": "user:menu"}]
                     ]
                 else:
@@ -3547,7 +3544,6 @@ We'll respond as quickly as possible! ⚡"""
             elif data == "user:menu":
                 user = (await db.execute(select(User).where(User.telegram_id==str(chat_id)))).scalars().first()
                 buttons = [
-                    [{"text": "🚀 Открыть приложение", "web_app": {"url": HOST_BASE}}],
                     [{"text": "💰 Мой баланс", "callback_data": "user:balance"}, {"text": "👥 Пригласить друга", "callback_data": "user:referral"}],
                     [{"text": "💬 Поддержка", "callback_data": "user:support"}, {"text": "📊 История", "callback_data": "user:history"}]
                 ]
