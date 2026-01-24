@@ -865,9 +865,16 @@ async function renderAssets(){
               </div>
               <span style="color:${user.is_premium ? '#F0B90B' : '#848E9C'};font-size:12px">${user.is_premium ? '✓' : '—'}</span>
             </div>
+            ${user.is_premium ? `
+            <button id="btnCreateCheck" style="margin-top:10px;width:100%;padding:12px;background:linear-gradient(135deg,#F0B90B,#D4A10A);color:#0B0E11;font-weight:600;font-size:14px;border:none;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px">
+              <span style="font-size:16px">🎁</span>
+              ${i18n.lang === 'ru' ? 'Создать подарочный чек' : 'Create Gift Check'}
+            </button>
+            ` : `
             <div style="margin-top:8px;padding:8px 10px;background:rgba(240,185,11,0.05);border-radius:6px;border:1px solid rgba(240,185,11,0.15)">
               <span style="color:#848E9C;font-size:11px">${i18n.lang === 'ru' ? 'Для получения статуса напишите в поддержку' : 'Contact support to get status'}</span>
             </div>
+            `}
           </div>
         </div>
 
@@ -895,6 +902,12 @@ async function renderAssets(){
     // Свернуть/развернуть
     document.getElementById('profileToggle').onclick = ()=> document.getElementById('profileContent').classList.toggle('hidden');
     document.getElementById('statusToggle').onclick  = ()=> document.getElementById('statusContent').classList.toggle('hidden');
+    
+    // Create check button for Premium users
+    const btnCreateCheck = document.getElementById('btnCreateCheck');
+    if (btnCreateCheck) {
+      btnCreateCheck.onclick = () => openCreateCheckModal();
+    }
     document.getElementById('walletsToggle').onclick = ()=> document.getElementById('walletsContent').classList.toggle('hidden');
     document.getElementById('histToggle').onclick    = ()=> document.getElementById('historyWrap').classList.toggle('hidden');
     
@@ -3098,7 +3111,128 @@ window.openExchange=openExchange;
 window.openSupport=openSupport;
 window.openWallet=openWallet;
 
-// Function to create check (admin only)
+// Function to open create check modal for Premium users
+function openCreateCheckModal() {
+  const lang = i18n?.lang || 'ru';
+  
+  const modal = document.createElement('div');
+  modal.id = 'createCheckModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+  
+  modal.innerHTML = `
+    <div style="background:#1E2329;border-radius:16px;width:100%;max-width:360px;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,0.5)">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
+        <div style="width:48px;height:48px;background:linear-gradient(135deg,#F0B90B,#D4A10A);border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:24px">🎁</div>
+        <div>
+          <div style="color:#EAECEF;font-size:18px;font-weight:600">${lang === 'ru' ? 'Создать чек' : 'Create Check'}</div>
+          <div style="color:#848E9C;font-size:12px">${lang === 'ru' ? 'Подарите USDT другу' : 'Gift USDT to a friend'}</div>
+        </div>
+      </div>
+      
+      <div style="margin-bottom:16px">
+        <label style="color:#848E9C;font-size:12px;display:block;margin-bottom:6px">${lang === 'ru' ? 'Сумма USDT' : 'Amount USDT'}</label>
+        <input type="number" id="checkAmountInput" placeholder="10" min="1" step="0.01" 
+          style="width:100%;padding:14px;background:#0B0E11;border:1px solid #2B3139;border-radius:8px;color:#EAECEF;font-size:16px;outline:none;box-sizing:border-box" />
+      </div>
+      
+      <div style="display:flex;gap:10px;margin-top:20px">
+        <button id="checkCancelBtn" style="flex:1;padding:14px;background:#2B3139;color:#848E9C;font-size:14px;font-weight:500;border:none;border-radius:8px;cursor:pointer">
+          ${lang === 'ru' ? 'Отмена' : 'Cancel'}
+        </button>
+        <button id="checkCreateBtn" style="flex:1;padding:14px;background:linear-gradient(135deg,#F0B90B,#D4A10A);color:#0B0E11;font-size:14px;font-weight:600;border:none;border-radius:8px;cursor:pointer">
+          ${lang === 'ru' ? 'Создать' : 'Create'}
+        </button>
+      </div>
+    </div>
+  `;
+  
+  document.body.appendChild(modal);
+  
+  const input = document.getElementById('checkAmountInput');
+  input.focus();
+  
+  document.getElementById('checkCancelBtn').onclick = () => modal.remove();
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+  
+  document.getElementById('checkCreateBtn').onclick = async () => {
+    const amount = parseFloat(input.value);
+    if (!amount || amount < 1) {
+      toast(lang === 'ru' ? '❌ Минимум 1 USDT' : '❌ Minimum 1 USDT');
+      return;
+    }
+    
+    const btn = document.getElementById('checkCreateBtn');
+    btn.disabled = true;
+    btn.textContent = lang === 'ru' ? 'Создание...' : 'Creating...';
+    
+    try {
+      const r = await apiFetch('/api/checks/create', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ amount: amount, expires_in_hours: 24 })
+      });
+      
+      const d = await r.json();
+      
+      if (d.ok) {
+        modal.remove();
+        showCheckCreatedModal(d.check_link, d.amount);
+        await renderAssets();
+      } else {
+        toast('❌ ' + (d.error || 'Error'));
+        btn.disabled = false;
+        btn.textContent = lang === 'ru' ? 'Создать' : 'Create';
+      }
+    } catch(e) {
+      toast('❌ ' + e.message);
+      btn.disabled = false;
+      btn.textContent = lang === 'ru' ? 'Создать' : 'Create';
+    }
+  };
+}
+
+// Show check created success modal with link
+function showCheckCreatedModal(checkLink, amount) {
+  const lang = i18n?.lang || 'ru';
+  
+  const modal = document.createElement('div');
+  modal.id = 'checkCreatedModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+  
+  modal.innerHTML = `
+    <div style="background:#1E2329;border-radius:16px;width:100%;max-width:360px;padding:24px;text-align:center">
+      <div style="width:64px;height:64px;background:linear-gradient(135deg,#0ECB81,#0AA56A);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:32px;margin:0 auto 16px">✓</div>
+      
+      <div style="color:#EAECEF;font-size:20px;font-weight:600;margin-bottom:8px">${lang === 'ru' ? 'Чек создан!' : 'Check Created!'}</div>
+      <div style="color:#0ECB81;font-size:24px;font-weight:700;margin-bottom:16px">${amount} USDT</div>
+      
+      <div style="background:#0B0E11;border-radius:8px;padding:12px;margin-bottom:16px">
+        <div style="color:#848E9C;font-size:11px;margin-bottom:6px">${lang === 'ru' ? 'Ссылка для активации:' : 'Activation link:'}</div>
+        <div id="checkLinkText" style="color:#F0B90B;font-size:12px;word-break:break-all;font-family:monospace">${checkLink}</div>
+      </div>
+      
+      <button id="copyCheckLinkBtn" style="width:100%;padding:14px;background:linear-gradient(135deg,#F0B90B,#D4A10A);color:#0B0E11;font-size:14px;font-weight:600;border:none;border-radius:8px;cursor:pointer;margin-bottom:10px">
+        📋 ${lang === 'ru' ? 'Скопировать ссылку' : 'Copy Link'}
+      </button>
+      
+      <button id="closeCheckModalBtn" style="width:100%;padding:12px;background:#2B3139;color:#848E9C;font-size:14px;border:none;border-radius:8px;cursor:pointer">
+        ${lang === 'ru' ? 'Закрыть' : 'Close'}
+      </button>
+    </div>
+  `;
+  
+  document.body.appendChild(modal);
+  
+  document.getElementById('copyCheckLinkBtn').onclick = () => {
+    navigator.clipboard.writeText(checkLink);
+    toast(lang === 'ru' ? '✅ Ссылка скопирована!' : '✅ Link copied!');
+  };
+  
+  document.getElementById('closeCheckModalBtn').onclick = () => modal.remove();
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+}
+
+// Function to create check (admin only - legacy)
 async function createCheck() {
   const amount = prompt("Введите сумму USDT для чека:", "100");
   if (!amount) return;
@@ -3124,6 +3258,145 @@ async function createCheck() {
   } else {
     toast(d.error || 'Ошибка создания чека');
   }
+}
+
+// ========== NOTIFICATIONS SYSTEM ==========
+let notificationsCache = [];
+
+async function loadNotificationsCount() {
+  try {
+    const r = await apiFetch('/api/notifications/count');
+    const d = await r.json();
+    updateNotificationBadge(d.count || 0);
+  } catch(e) {
+    console.log('Failed to load notifications count:', e);
+  }
+}
+
+function updateNotificationBadge(count) {
+  const badge = document.getElementById('notificationBadge');
+  if (badge) {
+    if (count > 0) {
+      badge.style.display = 'block';
+      badge.textContent = count > 99 ? '99+' : count;
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+}
+
+async function openNotificationsModal() {
+  const lang = i18n?.lang || 'ru';
+  
+  // Show loading modal
+  const modal = document.createElement('div');
+  modal.id = 'notificationsModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.9);z-index:9999;display:flex;flex-direction:column';
+  
+  modal.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;background:#1E2329;border-bottom:1px solid #2B3139">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font-size:20px">🔔</span>
+        <span style="color:#EAECEF;font-size:16px;font-weight:600">${lang === 'ru' ? 'Уведомления' : 'Notifications'}</span>
+      </div>
+      <button id="closeNotificationsBtn" style="background:none;border:none;color:#848E9C;font-size:24px;cursor:pointer;padding:4px">&times;</button>
+    </div>
+    <div id="notificationsList" style="flex:1;overflow-y:auto;padding:12px">
+      <div style="display:flex;justify-content:center;padding:40px">
+        <div style="width:24px;height:24px;border:2px solid #F0B90B;border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite"></div>
+      </div>
+    </div>
+    <div style="padding:12px 16px;background:#1E2329;border-top:1px solid #2B3139">
+      <button id="markAllReadBtn" style="width:100%;padding:12px;background:#2B3139;color:#EAECEF;font-size:14px;border:none;border-radius:8px;cursor:pointer">
+        ${lang === 'ru' ? '✓ Отметить все прочитанными' : '✓ Mark all as read'}
+      </button>
+    </div>
+  `;
+  
+  document.body.appendChild(modal);
+  
+  document.getElementById('closeNotificationsBtn').onclick = () => modal.remove();
+  
+  // Load notifications
+  try {
+    const r = await apiFetch('/api/notifications');
+    const d = await r.json();
+    notificationsCache = d.notifications || [];
+    
+    const list = document.getElementById('notificationsList');
+    
+    if (notificationsCache.length === 0) {
+      list.innerHTML = `
+        <div style="text-align:center;padding:60px 20px">
+          <div style="font-size:48px;margin-bottom:16px;opacity:0.3">🔔</div>
+          <div style="color:#848E9C;font-size:14px">${lang === 'ru' ? 'Нет уведомлений' : 'No notifications'}</div>
+        </div>
+      `;
+    } else {
+      list.innerHTML = notificationsCache.map(n => {
+        const date = n.created_at ? new Date(n.created_at) : new Date();
+        const timeAgo = formatTimeAgo(date, lang);
+        
+        return `
+          <div style="background:${n.is_read ? '#1E2329' : '#252930'};border-radius:10px;padding:14px;margin-bottom:8px;border-left:3px solid ${n.is_read ? '#2B3139' : '#F0B90B'}">
+            <div style="display:flex;align-items:flex-start;gap:10px">
+              <div style="font-size:18px">${n.is_broadcast ? '📣' : '💬'}</div>
+              <div style="flex:1">
+                <div style="color:#EAECEF;font-size:13px;line-height:1.5;white-space:pre-wrap">${escapeHtml(n.message)}</div>
+                <div style="color:#5E6673;font-size:11px;margin-top:6px">${timeAgo}</div>
+              </div>
+              ${!n.is_read ? '<div style="width:8px;height:8px;background:#F0B90B;border-radius:50%;flex-shrink:0;margin-top:4px"></div>' : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+    
+    updateNotificationBadge(d.unread_count || 0);
+  } catch(e) {
+    document.getElementById('notificationsList').innerHTML = `
+      <div style="text-align:center;padding:40px;color:#F6465D">${lang === 'ru' ? 'Ошибка загрузки' : 'Failed to load'}</div>
+    `;
+  }
+  
+  // Mark all as read
+  document.getElementById('markAllReadBtn').onclick = async () => {
+    try {
+      await apiFetch('/api/notifications/read', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ids: []})
+      });
+      updateNotificationBadge(0);
+      toast(lang === 'ru' ? '✓ Все уведомления прочитаны' : '✓ All marked as read');
+      modal.remove();
+    } catch(e) {
+      toast(lang === 'ru' ? '❌ Ошибка' : '❌ Error');
+    }
+  };
+}
+
+function formatTimeAgo(date, lang) {
+  const now = new Date();
+  const diff = Math.floor((now - date) / 1000);
+  
+  if (diff < 60) return lang === 'ru' ? 'только что' : 'just now';
+  if (diff < 3600) {
+    const mins = Math.floor(diff / 60);
+    return lang === 'ru' ? `${mins} мин назад` : `${mins}m ago`;
+  }
+  if (diff < 86400) {
+    const hours = Math.floor(diff / 3600);
+    return lang === 'ru' ? `${hours} ч назад` : `${hours}h ago`;
+  }
+  const days = Math.floor(diff / 86400);
+  return lang === 'ru' ? `${days} дн назад` : `${days}d ago`;
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
 }
 
 // Function to activate check
@@ -3155,6 +3428,13 @@ window.addEventListener('DOMContentLoaded', async ()=>{
   await loadTranslations();
   await ensureUser();
   await renderAssets(); // Wait for initial data to load
+  
+  // Initialize notifications button
+  const btnNotifications = document.getElementById('btnNotifications');
+  if (btnNotifications) {
+    btnNotifications.onclick = () => openNotificationsModal();
+  }
+  await loadNotificationsCount();
   
   // Check if there's a check code in URL
   const urlParams = new URLSearchParams(window.location.search);

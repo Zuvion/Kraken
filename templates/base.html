@@ -57,7 +57,10 @@
     <div class="header-title kraken-brand">Kraken</div>
     <div class="actions">
       <button class="icon-btn" id="btnLang" title="Language">🌐</button>
-      <button class="icon-btn" title="Notifications">🔔</button>
+      <button class="icon-btn" id="btnNotifications" title="Notifications" style="position:relative">
+        🔔
+        <span id="notificationBadge" style="display:none;position:absolute;top:-2px;right:-2px;background:#F6465D;color:#fff;font-size:9px;font-weight:700;min-width:14px;height:14px;border-radius:7px;padding:0 3px;line-height:14px;text-align:center"></span>
+      </button>
     </div>
   </div>
   <div id="root"></div>
