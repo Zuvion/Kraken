@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 import aiohttp
-from sqlalchemy import Column, Integer, String, DateTime, Float, Text, ForeignKey, JSON, Boolean, select, func, text
+from sqlalchemy import Column, Integer, String, DateTime, Float, Text, ForeignKey, JSON, Boolean, select, func, text, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -163,6 +163,14 @@ class AdminMessage(Base):
     delivery_type=Column(String, default="app_chat")  # "app_chat" or "telegram_chat"
     created_at=Column(DateTime, default=datetime.utcnow)
     deleted_at=Column(DateTime, nullable=True)
+
+class UserNotificationRead(Base):
+    """Tracks which notifications a user has read"""
+    __tablename__="user_notification_reads"
+    id=Column(Integer, primary_key=True)
+    user_id=Column(Integer, ForeignKey("users.id"), index=True)
+    admin_message_id=Column(Integer, ForeignKey("admin_messages.id"), index=True)
+    read_at=Column(DateTime, default=datetime.utcnow)
 
 class Asset(Base):
     __tablename__="assets"
@@ -566,6 +574,136 @@ async def api_user(db: AsyncSession=Depends(get_db), request: Request=None):
         del wallets['RUB']
     
     return {"id":u.id,"telegram_id":u.telegram_id,"profile_id":u.profile_id,"language":u.language,"balance_usdt":displayed_balance,"balance_rub":u.balance_rub or 0.0,"preferred_fiat":u.preferred_fiat or "RUB","wallets":wallets,"addresses":u.addresses or {},"is_admin":is_admin,"is_verified":u.is_verified or False,"is_premium":u.is_premium or False,"is_blocked":u.is_blocked or False,"block_reason":u.block_reason}
+
+# ========== NOTIFICATIONS API ==========
+@app.get("/api/notifications")
+async def api_get_notifications(db: AsyncSession=Depends(get_db), request: Request=None):
+    """Get all notifications for user (broadcasts + personal messages)"""
+    tid = request.headers.get("X-Telegram-Id")
+    if not tid:
+        return {"notifications": [], "unread_count": 0}
+    
+    user = (await db.execute(select(User).where(User.telegram_id == str(tid)))).scalars().first()
+    if not user:
+        return {"notifications": [], "unread_count": 0}
+    
+    # Get personal messages for this user
+    personal = (await db.execute(
+        select(AdminMessage)
+        .where(AdminMessage.user_id == user.id, AdminMessage.is_deleted == False)
+        .order_by(AdminMessage.created_at.desc())
+        .limit(50)
+    )).scalars().all()
+    
+    # Get global broadcasts (user_id is NULL and is_broadcast is True)
+    broadcasts = (await db.execute(
+        select(AdminMessage)
+        .where(AdminMessage.user_id == None, AdminMessage.is_broadcast == True, AdminMessage.is_deleted == False)
+        .order_by(AdminMessage.created_at.desc())
+        .limit(50)
+    )).scalars().all()
+    
+    # Combine and sort by date
+    all_msgs = list(personal) + list(broadcasts)
+    all_msgs.sort(key=lambda x: x.created_at, reverse=True)
+    
+    # Get read notification IDs for this user
+    read_ids = set((await db.execute(
+        select(UserNotificationRead.admin_message_id)
+        .where(UserNotificationRead.user_id == user.id)
+    )).scalars().all())
+    
+    # Build response
+    notifications = []
+    unread_count = 0
+    for msg in all_msgs[:30]:
+        is_read = msg.id in read_ids
+        if not is_read:
+            unread_count += 1
+        notifications.append({
+            "id": msg.id,
+            "message": msg.message_text,
+            "is_broadcast": msg.is_broadcast,
+            "is_read": is_read,
+            "created_at": msg.created_at.isoformat() if msg.created_at else None
+        })
+    
+    return {"notifications": notifications, "unread_count": unread_count}
+
+@app.post("/api/notifications/read")
+async def api_mark_notifications_read(request: Request, db: AsyncSession=Depends(get_db)):
+    """Mark notifications as read"""
+    tid = request.headers.get("X-Telegram-Id")
+    if not tid:
+        return {"ok": False}
+    
+    user = (await db.execute(select(User).where(User.telegram_id == str(tid)))).scalars().first()
+    if not user:
+        return {"ok": False}
+    
+    data = await request.json()
+    notification_ids = data.get("ids", [])
+    
+    if not notification_ids:
+        # Mark all as read
+        all_notifications = (await db.execute(
+            select(AdminMessage.id)
+            .where(
+                or_(
+                    AdminMessage.user_id == user.id,
+                    and_(AdminMessage.user_id == None, AdminMessage.is_broadcast == True)
+                ),
+                AdminMessage.is_deleted == False
+            )
+        )).scalars().all()
+        notification_ids = list(all_notifications)
+    
+    # Get already read IDs
+    already_read = set((await db.execute(
+        select(UserNotificationRead.admin_message_id)
+        .where(UserNotificationRead.user_id == user.id)
+    )).scalars().all())
+    
+    # Add new read entries
+    for nid in notification_ids:
+        if nid not in already_read:
+            db.add(UserNotificationRead(user_id=user.id, admin_message_id=nid))
+    
+    await db.commit()
+    return {"ok": True}
+
+@app.get("/api/notifications/count")
+async def api_notifications_count(db: AsyncSession=Depends(get_db), request: Request=None):
+    """Get unread notifications count"""
+    tid = request.headers.get("X-Telegram-Id")
+    if not tid:
+        return {"count": 0}
+    
+    user = (await db.execute(select(User).where(User.telegram_id == str(tid)))).scalars().first()
+    if not user:
+        return {"count": 0}
+    
+    # Get all notification IDs for user
+    personal_ids = (await db.execute(
+        select(AdminMessage.id)
+        .where(AdminMessage.user_id == user.id, AdminMessage.is_deleted == False)
+    )).scalars().all()
+    
+    broadcast_ids = (await db.execute(
+        select(AdminMessage.id)
+        .where(AdminMessage.user_id == None, AdminMessage.is_broadcast == True, AdminMessage.is_deleted == False)
+    )).scalars().all()
+    
+    all_ids = set(personal_ids) | set(broadcast_ids)
+    
+    # Get read IDs
+    read_ids = set((await db.execute(
+        select(UserNotificationRead.admin_message_id)
+        .where(UserNotificationRead.user_id == user.id)
+    )).scalars().all())
+    
+    unread_count = len(all_ids - read_ids)
+    return {"count": unread_count}
 
 @app.get("/api/referrals")
 async def api_referrals(db: AsyncSession=Depends(get_db), request: Request=None):
@@ -2027,16 +2165,142 @@ async def api_admin_check_create(payload: CheckCreate, request: Request, db: Asy
     
     await db.commit()
     
-    # Генерируем ссылку для активации
-    check_link = f"{HOST_BASE}/?check={check_code}"
+    # Генерируем ссылку для активации через бота
+    bot_link = f"https://t.me/KrakenEdgebot?start=check_{check_code}"
     
     return {
         "ok": True,
         "check_code": check_code,
-        "check_link": check_link,
+        "check_link": bot_link,
         "amount_usdt": payload.amount_usdt,
         "expires_at": expires_at.isoformat(),
         "admin_balance": admin_user.balance_usdt
+    }
+
+# API for Premium users to create checks
+class UserCheckCreate(BaseModel):
+    amount: float
+    expires_in_hours: int = 24
+
+@app.post("/api/checks/create")
+async def api_user_check_create(payload: UserCheckCreate, request: Request, db: AsyncSession=Depends(get_db)):
+    """Premium пользователь создаёт чек (списывается с его баланса)"""
+    
+    tid = request.headers.get("X-Telegram-Id")
+    if not tid:
+        raise HTTPException(401, "Unauthorized")
+    
+    user = (await db.execute(select(User).where(User.telegram_id == str(tid)))).scalars().first()
+    if not user:
+        raise HTTPException(404, "User not found")
+    
+    # Проверяем Premium статус
+    if not user.is_premium and str(tid) != str(ADMIN_ID):
+        return JSONResponse({"ok": False, "error": "Создание чеков доступно только Premium пользователям"})
+    
+    # Проверяем минимальную сумму
+    if payload.amount < 1:
+        return JSONResponse({"ok": False, "error": "Минимальная сумма чека: 1 USDT"})
+    
+    # Проверяем баланс
+    if (user.balance_usdt or 0) < payload.amount:
+        return JSONResponse({"ok": False, "error": f"Недостаточно средств. Баланс: {user.balance_usdt:.2f} USDT"})
+    
+    # Генерируем код
+    import secrets
+    check_code = secrets.token_urlsafe(16)
+    
+    # Дата истечения
+    expires_at = datetime.utcnow() + timedelta(hours=payload.expires_in_hours)
+    
+    # Списываем с баланса
+    user.balance_usdt = (user.balance_usdt or 0) - payload.amount
+    
+    # Создаём чек
+    new_check = Check(
+        creator_id=user.id,
+        amount_usdt=payload.amount,
+        check_code=check_code,
+        status="active",
+        expires_at=expires_at
+    )
+    db.add(new_check)
+    
+    # Записываем транзакцию
+    db.add(Transaction(
+        user_id=user.id,
+        type="check_create",
+        amount=-payload.amount,
+        currency="USDT",
+        status="done",
+        details={"check_code": check_code, "expires_at": expires_at.isoformat()}
+    ))
+    
+    await db.commit()
+    
+    bot_link = f"https://t.me/KrakenEdgebot?start=check_{check_code}"
+    
+    return {
+        "ok": True,
+        "check_code": check_code,
+        "check_link": bot_link,
+        "amount": payload.amount,
+        "expires_at": expires_at.isoformat(),
+        "new_balance": user.balance_usdt
+    }
+
+@app.post("/api/checks/redeem")
+async def api_checks_redeem(payload: CheckActivate, request: Request, db: AsyncSession=Depends(get_db)):
+    """Активация чека через API (альтернатива боту)"""
+    
+    tid = request.headers.get("X-Telegram-Id")
+    if not tid:
+        raise HTTPException(401, "Unauthorized")
+    
+    user = (await db.execute(select(User).where(User.telegram_id == str(tid)))).scalars().first()
+    if not user:
+        raise HTTPException(404, "User not found")
+    
+    check = (await db.execute(select(Check).where(Check.check_code == payload.check_code))).scalars().first()
+    
+    if not check:
+        return JSONResponse({"ok": False, "error": "Чек не найден"})
+    
+    if check.status != "active":
+        return JSONResponse({"ok": False, "error": "Чек уже активирован или истёк"})
+    
+    if check.expires_at and datetime.utcnow() > check.expires_at:
+        check.status = "expired"
+        await db.commit()
+        return JSONResponse({"ok": False, "error": "Срок действия чека истёк"})
+    
+    if check.creator_id == user.id:
+        return JSONResponse({"ok": False, "error": "Вы не можете активировать свой собственный чек"})
+    
+    # Активируем чек
+    check.status = "activated"
+    check.activated_by = user.id
+    check.activated_at = datetime.utcnow()
+    
+    # Начисляем баланс
+    user.balance_usdt = (user.balance_usdt or 0) + check.amount_usdt
+    
+    # Записываем транзакцию
+    db.add(Transaction(
+        user_id=user.id,
+        type="check_activate",
+        amount=check.amount_usdt,
+        currency="USDT",
+        status="done",
+        details={"check_code": payload.check_code, "creator_id": check.creator_id}
+    ))
+    
+    await db.commit()
+    
+    return {
+        "ok": True,
+        "amount": check.amount_usdt,
+        "new_balance": user.balance_usdt
     }
 
 @app.post("/api/check/activate")
@@ -3549,6 +3813,78 @@ We'll respond as quickly as possible! ⚡"""
                 ]
                 await bot_send_message(chat_id, "🐙 <b>Главное меню Kraken</b>\n\nВыберите действие:", buttons, parse_mode="HTML")
             
+            # ========== CHECK ACTIVATION CALLBACKS ==========
+            
+            # Check: Activate check from bot
+            elif data.startswith("check:activate:"):
+                check_code = data.split(":")[2]
+                user = (await db.execute(select(User).where(User.telegram_id==str(chat_id)))).scalars().first()
+                
+                if not user:
+                    await bot_send_message(chat_id, "❌ Пользователь не найден", parse_mode="HTML")
+                    return {"ok": True}
+                
+                check = (await db.execute(select(Check).where(Check.check_code == check_code))).scalars().first()
+                
+                if not check:
+                    await bot_send_message(chat_id, "❌ Чек не найден", parse_mode="HTML")
+                    return {"ok": True}
+                
+                if check.status != "active":
+                    await bot_send_message(chat_id, "❌ Чек уже активирован или истёк", parse_mode="HTML")
+                    return {"ok": True}
+                
+                if check.expires_at and datetime.utcnow() > check.expires_at:
+                    check.status = "expired"
+                    await db.commit()
+                    await bot_send_message(chat_id, "❌ Срок действия чека истёк", parse_mode="HTML")
+                    return {"ok": True}
+                
+                if check.creator_id == user.id:
+                    await bot_send_message(chat_id, "❌ Вы не можете активировать свой собственный чек", parse_mode="HTML")
+                    return {"ok": True}
+                
+                # Activate the check
+                check.status = "activated"
+                check.activated_by = user.id
+                check.activated_at = datetime.utcnow()
+                
+                # Credit USDT to user
+                user.balance_usdt = (user.balance_usdt or 0) + check.amount_usdt
+                
+                # Record transaction
+                db.add(Transaction(
+                    user_id=user.id,
+                    type="check_activate",
+                    amount=check.amount_usdt,
+                    currency="USDT",
+                    status="done",
+                    details={"check_code": check_code, "creator_id": check.creator_id}
+                ))
+                
+                await db.commit()
+                
+                # Notify user
+                success_text = f"""✅ <b>Чек активирован!</b>
+
+💰 Получено: <b>{check.amount_usdt:.2f} USDT</b>
+📊 Новый баланс: <b>{user.balance_usdt:.2f} USDT</b>"""
+                
+                await bot_send_message(chat_id, success_text, parse_mode="HTML")
+                
+                # Notify admin
+                try:
+                    await bot_send_message(
+                        int(ADMIN_ID),
+                        f"✅ <b>Чек активирован!</b>\n\n💰 Сумма: {check.amount_usdt} USDT\n👤 Активировал: #{user.profile_id}\n🔑 Код: <code>{check_code}</code>",
+                        parse_mode="HTML"
+                    )
+                except: pass
+            
+            # Check: Cancel
+            elif data == "check:cancel":
+                await bot_send_message(chat_id, "❌ Активация чека отменена", parse_mode="HTML")
+            
             # ========== END USER MENU CALLBACKS ==========
             
             # Return OK after processing callback
@@ -3698,17 +4034,57 @@ We'll respond as quickly as possible! ⚡"""
             
             # Handle /start command - Main menu for admin or welcome for users
             if text.startswith("/start"):
-                # Extract referral code if present (format: /start REFCODE)
-                referrer_code = None
+                # Extract parameter if present (format: /start PARAM)
+                start_param = None
                 if " " in text:
-                    referrer_code = text.split(" ", 1)[1].strip()
+                    start_param = text.split(" ", 1)[1].strip()
                 
                 username = msg.get("from", {}).get("username")
                 user = (await db.execute(select(User).where(User.telegram_id==str(chat_id)))).scalars().first()
                 if not user:
-                    user = await get_or_create_user(db, str(chat_id), username, "ru", referrer_code)
+                    user = await get_or_create_user(db, str(chat_id), username, "ru", start_param if start_param and not start_param.startswith("check_") else None)
                 
-                if user.referred_by and referrer_code:
+                # Handle check activation: /start check_<token>
+                if start_param and start_param.startswith("check_"):
+                    check_code = start_param[6:]  # Remove "check_" prefix
+                    
+                    # Find the check
+                    check = (await db.execute(select(Check).where(Check.check_code == check_code))).scalars().first()
+                    
+                    if not check:
+                        await bot_send_message(chat_id, "❌ Чек не найден", parse_mode="HTML")
+                        return {"ok": True}
+                    
+                    if check.status != "active":
+                        await bot_send_message(chat_id, "❌ Чек уже активирован или истёк", parse_mode="HTML")
+                        return {"ok": True}
+                    
+                    if check.expires_at and datetime.utcnow() > check.expires_at:
+                        check.status = "expired"
+                        await db.commit()
+                        await bot_send_message(chat_id, "❌ Срок действия чека истёк", parse_mode="HTML")
+                        return {"ok": True}
+                    
+                    if check.creator_id == user.id:
+                        await bot_send_message(chat_id, "❌ Вы не можете активировать свой собственный чек", parse_mode="HTML")
+                        return {"ok": True}
+                    
+                    # Show check info with activation button
+                    check_text = f"""🎁 <b>Подарочный чек</b>
+
+💰 Сумма: <b>{check.amount_usdt:.2f} USDT</b>
+
+Нажмите кнопку ниже, чтобы получить средства на свой баланс."""
+                    
+                    buttons = [
+                        [{"text": "✅ Активировать чек", "callback_data": f"check:activate:{check_code}"}],
+                        [{"text": "❌ Отмена", "callback_data": "check:cancel"}]
+                    ]
+                    await bot_send_message(chat_id, check_text, buttons, parse_mode="HTML")
+                    return {"ok": True}
+                
+                # Regular start - referral or welcome
+                if user.referred_by and start_param and not start_param.startswith("check_"):
                     welcome_text = """🐙 <b>Добро пожаловать в Kraken!</b>
 
 🎁 Вы пришли по приглашению друга!
@@ -4697,3 +5073,6 @@ BTC, ETH, TON, SOL, BNB, XRP, DOGE, LTC, TRX, USDT
         print(f"Webhook error: {e}")
     return {"ok":True}
 app.include_router(router)
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=5000)
