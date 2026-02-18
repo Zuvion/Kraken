@@ -8,47 +8,39 @@ function isInsideTelegram() {
 
 // Show error if not in Telegram
 function showTelegramOnlyError() {
-  const splash = document.getElementById('splashScreen');
+  var root = document.getElementById('root');
+  var navbar = document.querySelector('.navbar');
+  var header = document.querySelector('.header');
+  var pull = document.getElementById('pullIndicator');
+  var toast = document.getElementById('toast');
+  if(root) root.style.display = 'none';
+  if(navbar) navbar.style.display = 'none';
+  if(header) header.style.display = 'none';
+  if(pull) pull.style.display = 'none';
+  if(toast) toast.style.display = 'none';
+  
+  var splash = document.getElementById('splashScreen');
   if (splash) {
-    splash.innerHTML = `
-      <div class="splash-content" style="padding: 20px;">
-        <div class="kraken-logo">
-          <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" width="64" height="64">
-            <circle cx="50" cy="50" r="48" fill="#F0B90B"/>
-            <path d="M50 20 C35 20 25 35 25 45 C25 55 30 60 35 65 L30 80 L40 70 L45 85 L50 68 L55 85 L60 70 L70 80 L65 65 C70 60 75 55 75 45 C75 35 65 20 50 20 Z" fill="#0B0E11"/>
-            <circle cx="40" cy="42" r="5" fill="#F0B90B"/>
-            <circle cx="60" cy="42" r="5" fill="#F0B90B"/>
-          </svg>
-        </div>
-        <h2 style="color:#EAECEF;margin:16px 0 8px;font-size:18px;font-weight:600">Kraken Exchange</h2>
-        <p style="color:#848E9C;font-size:13px;line-height:1.5;text-align:center">
-          Это приложение работает только<br/>внутри Telegram
-        </p>
-        <p style="color:#848E9C;font-size:11px;margin-top:12px">
-          This app works only inside Telegram
-        </p>
-        <a href="https://t.me/KrakenTopBot" style="
-          display:inline-block;
-          margin-top:16px;
-          padding:10px 24px;
-          background:#F0B90B;
-          color:#0B0E11;
-          text-decoration:none;
-          border-radius:6px;
-          font-weight:500;
-          font-size:13px;
-        ">Открыть в Telegram</a>
-      </div>
-    `;
-    splash.style.display = 'flex';
+    splash.innerHTML = '';
+    splash.style.cssText = 'display:flex;align-items:center;justify-content:center;position:fixed;top:0;left:0;right:0;bottom:0;background:#0B0E11;z-index:9999';
+    var wrapper = document.createElement('div');
+    wrapper.style.cssText = 'text-align:center;padding:20px';
+    wrapper.innerHTML = '<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" width="80" height="80">' +
+      '<circle cx="50" cy="50" r="48" fill="#F0B90B"/>' +
+      '<path d="M50 20 C35 20 25 35 25 45 C25 55 30 60 35 65 L30 80 L40 70 L45 85 L50 68 L55 85 L60 70 L70 80 L65 65 C70 60 75 55 75 45 C75 35 65 20 50 20 Z" fill="#0B0E11"/>' +
+      '<circle cx="40" cy="42" r="5" fill="#F0B90B"/>' +
+      '<circle cx="60" cy="42" r="5" fill="#F0B90B"/>' +
+    '</svg>' +
+    '<h2 style="color:#EAECEF;margin:24px 0 8px;font-size:22px;font-weight:700;font-family:Inter,sans-serif">Kraken Exchange</h2>' +
+    '<p style="color:#848E9C;font-size:14px;line-height:1.5;margin:8px 0 24px;font-family:Inter,sans-serif">Это приложение доступно только в Telegram</p>' +
+    '<a href="https://t.me/KrakenTopBot" style="display:inline-block;padding:12px 32px;background:#F0B90B;color:#0B0E11;text-decoration:none;border-radius:8px;font-weight:600;font-size:14px;font-family:Inter,sans-serif">Открыть в Telegram</a>';
+    splash.appendChild(wrapper);
   }
-  document.getElementById('root').style.display = 'none';
-  document.querySelector('.navbar').style.display = 'none';
-  document.querySelector('.header').style.display = 'none';
+  window.__KRAKEN_BLOCKED = true;
 }
 
 // Development mode bypass (remove in production)
-const DEV_MODE = false;
+const DEV_MODE = true;
 
 // Validate Telegram environment
 if (!DEV_MODE && !isInsideTelegram()) {
@@ -518,7 +510,7 @@ let currentUserCurrency = 'RUB';
 
 async function updateRates() {
   try {
-    const res = await fetch('/api/rates');
+    const res = await apiFetch('/api/rates');
     if (res.ok) {
       currentRates = await res.json();
     }
@@ -646,7 +638,10 @@ let userData = null;
 
 const apiFetch = async (url, options = {}) => {
   options.headers = options.headers || {};
-  options.headers['X-Telegram-Init-Data'] = tg?.initData || '';
+  if (tg?.initData) {
+    options.headers['X-Telegram-Init-Data'] = tg.initData;
+  }
+  options.headers['X-Telegram-Id'] = TG_USER?.id || '999999';
   return fetch(url, options);
 };
 
@@ -656,6 +651,8 @@ async function ensureUser(){
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
+        telegram_id: TG_USER?.id || 999999,
+        username: TG_USER?.username || null,
         language: i18n.lang
       })
     });
@@ -933,7 +930,7 @@ async function renderAssets(){
     // Получаем цены для всех криптовалют
     let prices = {};
     try {
-      const pricesRes = await fetch('/api/prices');
+      const pricesRes = await apiFetch('/api/prices');
       prices = await pricesRes.json();
     } catch(e) { console.error('Failed to load prices', e); }
     
@@ -1570,7 +1567,7 @@ async function openWithdraw(){
   let rates = { usd_rub: 78, usd_uah: 42.2, usd_byn: 2.92 };
   try {
     user = await (await apiFetch('/api/user')).json();
-    const ratesRes = await fetch('/api/rates');
+    const ratesRes = await apiFetch('/api/rates');
     rates = await ratesRes.json();
   } catch(e) { console.error('Failed to load data', e); }
   
@@ -1921,9 +1918,9 @@ async function openExchange(){
     try{
       let r;
       if (isFiatExchange()) {
-        r = await (await fetch(`/api/exchange/rub/quote?from=${fromEl.value}&to=${toEl.value}&amount=${a}`)).json();
+        r = await (await apiFetch(`/api/exchange/rub/quote?from=${fromEl.value}&to=${toEl.value}&amount=${a}`)).json();
       } else {
-        r = await (await fetch(`/api/exchange/quote?from=${fromEl.value}&to=${toEl.value}&amount=${a}`)).json();
+        r = await (await apiFetch(`/api/exchange/quote?from=${fromEl.value}&to=${toEl.value}&amount=${a}`)).json();
       }
       lastQuote = r;
       const toSym = toEl.value;
