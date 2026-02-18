@@ -27,7 +27,7 @@ function showTelegramOnlyError() {
         <p style="color:#848E9C;font-size:11px;margin-top:12px">
           This app works only inside Telegram
         </p>
-        <a href="https://t.me/KrakenEdgebot" style="
+        <a href="https://t.me/KrakenTopBot" style="
           display:inline-block;
           margin-top:16px;
           padding:10px 24px;
@@ -48,7 +48,7 @@ function showTelegramOnlyError() {
 }
 
 // Development mode bypass (remove in production)
-const DEV_MODE = true;
+const DEV_MODE = false;
 
 // Validate Telegram environment
 if (!DEV_MODE && !isInsideTelegram()) {
@@ -642,11 +642,11 @@ async function openSettings() {
 
 // -------- Auth bootstrap ----------
 let TG_USER=null; try{ TG_USER = tg?.initDataUnsafe?.user || null }catch(e){}
+let userData = null;
 
-// Authenticated fetch wrapper - automatically adds X-Telegram-Id header
 const apiFetch = async (url, options = {}) => {
   options.headers = options.headers || {};
-  options.headers['X-Telegram-Id'] = TG_USER?.id || '999999';
+  options.headers['X-Telegram-Init-Data'] = tg?.initData || '';
   return fetch(url, options);
 };
 
@@ -656,8 +656,6 @@ async function ensureUser(){
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
-        telegram_id: TG_USER?.id||null,
-        username: TG_USER?.username||null,
         language: i18n.lang
       })
     });
@@ -720,6 +718,17 @@ async function renderAssets(){
     
     let user={ balance_usdt:0, wallets:{}, addresses:{}, profile_id:0, preferred_fiat:'RUB' };
     try{ user = await (await apiFetch('/api/user')).json(); }catch(e){ console.error('api/user failed',e); }
+    userData = user;
+    const navProfile = document.getElementById('navProfile');
+    const navProfileLabel = document.getElementById('navProfileLabel');
+    if(navProfile) {
+      navProfile.style.display = '';
+      if(userData?.is_admin) {
+        navProfileLabel.textContent = 'Админ';
+      } else {
+        navProfileLabel.textContent = 'Профиль';
+      }
+    }
     
     // Check if user is blocked
     if(user.is_blocked){
@@ -1053,7 +1062,6 @@ async function renderAssets(){
                 ${h.type === 'deposit' 
                   ? `<div><b>${t('history.source')}:</b> ${h.details?.source || t('history.source.crypto_pay')}</div>` 
                   : withdrawalDetailsHTML}
-                ${h.details?.fee ? `<div style="margin-top:4px"><b>${t('history.fee')}:</b> ${h.details.fee} ${h.currency}</div>` : ''}
                 <div style="margin-top:4px"><b>${t('history.status')}:</b> ${(() => {
                   const statusKey = 'history.status.' + h.status;
                   const translated = t(statusKey);
@@ -1610,10 +1618,6 @@ async function openWithdraw(){
             <span style="color:#9ca3af">${i18n.lang === 'ru' ? 'Сумма в $' : 'Amount in $'}:</span>
             <span style="color:#fff;font-weight:600" id="wUsdtAmount">0$</span>
           </div>
-          <div style="display:flex;justify-content:space-between;margin-bottom:8px">
-            <span style="color:#9ca3af">${i18n.lang === 'ru' ? 'Комиссия' : 'Fee'} (10%):</span>
-            <span style="color:#F6465D;font-weight:600" id="wFee">0$</span>
-          </div>
           <div style="display:flex;justify-content:space-between;border-top:1px solid rgba(98,77,228,0.3);padding-top:8px;margin-top:8px">
             <span style="color:#9ca3af">${i18n.lang === 'ru' ? 'К списанию' : 'To be charged'}:</span>
             <span style="color:#F0B90B;font-weight:700" id="wTotal">0$</span>
@@ -1650,7 +1654,7 @@ async function openWithdraw(){
   const totalEl=document.getElementById('wTotal');
   
   const MIN_WITHDRAW = MIN_IN_FIAT;
-  const FEE_PERCENT = 10;
+  const FEE_PERCENT = 0;
   
   // Быстрые кнопки
   document.querySelectorAll('.quick-btn').forEach(btn => {
@@ -1690,7 +1694,6 @@ async function openWithdraw(){
       const total = usdtAmount + fee;
       
       usdtAmountEl.textContent = `${usdtAmount.toFixed(2)}$`;
-      feeEl.textContent = `${fee.toFixed(2)}$`;
       totalEl.textContent = `${total.toFixed(2)}$`;
     } else { 
       amountEl.style.borderColor = '';
@@ -2008,7 +2011,7 @@ async function openWallet(sym){
   document.getElementById('whToggle').onclick = ()=> document.getElementById('walletHist').classList.toggle('hidden');
   
   // Add Create Check button for admin (USDT wallet only)
-  const isAdmin = TG_USER?.id && TG_USER.id.toString() === (window.ADMIN_ID || '').toString();
+  const isAdmin = userData?.is_admin === true;
   if (isAdmin && sym === 'USDT') {
     const checkBtn = document.createElement('button');
     checkBtn.className = 'btn btn-secondary';
@@ -2533,10 +2536,8 @@ async function openPair(pair, displayName = null){
     wickDownColor: '#F6465D',
   });
 
-  // Create entry price line series (horizontal dashed line for active trades)
-  let entryPriceLine = null;
+  let entryPriceLines = [];
 
-  // Store markers for active trades
   let activeTradeMarkers = [];
   let isFirstChartLoad = true;
   let userInteracting = false;
@@ -2568,54 +2569,61 @@ async function openPair(pair, displayName = null){
         close: c.c,
       }));
 
-      // Update candlestick series
       candleSeries.setData(candleData);
 
-      // Load active trades for markers and entry price line
+      const candleTimes = candleData.map(c => c.time).sort((a, b) => a - b);
+
+      function parseUTC(isoStr) {
+        if (!isoStr) return 0;
+        const s = isoStr.endsWith('Z') ? isoStr : isoStr + 'Z';
+        return Math.floor(new Date(s).getTime() / 1000);
+      }
+
+      function snapToCandle(ts) {
+        if (candleTimes.length === 0) return ts;
+        let best = candleTimes[0];
+        for (let i = candleTimes.length - 1; i >= 0; i--) {
+          if (candleTimes[i] <= ts) { best = candleTimes[i]; break; }
+        }
+        return best;
+      }
+
       try {
         const tradesRes = await apiFetch('/api/trade/active');
         if (!tradesRes.ok) throw new Error('API error');
         const tradesData = await tradesRes.json();
         const activeTrades = Array.isArray(tradesData) ? tradesData : (tradesData.trades || []);
-        
-        // Filter trades for current pair
+
         const pairNormalized = pair.replace('-', '').replace('/', '');
-        const tradesForPair = activeTrades.filter(t => 
+        const tradesForPair = activeTrades.filter(t =>
           t.pair.replace('-', '').replace('/', '') === pairNormalized
         );
-        
-        // Create markers for active trades
-        const markers = tradesForPair.map(t => {
-            const tradeTime = Math.floor(new Date(t.entry_time).getTime() / 1000);
-            const side = t.side === 'buy' ? '⬆️' : '⬇️';
-            const color = t.side === 'buy' ? '#0ECB81' : '#F6465D';
-            
-            return {
-              time: tradeTime,
-              position: t.side === 'buy' ? 'belowBar' : 'aboveBar',
-              color: color,
-              shape: t.side === 'buy' ? 'arrowUp' : 'arrowDown',
-              text: `${side} ${t.amount_usdt} USDT`,
-            };
-          });
 
-        candleSeries.setMarkers(markers);
-        activeTradeMarkers = markers;
-        
-        // Add entry price line for active trade
-        if (tradesForPair.length > 0 && tradesForPair[0].start_price) {
-          const activeTrade = tradesForPair[0];
-          const entryPrice = parseFloat(activeTrade.start_price);
-          const lineColor = activeTrade.side === 'buy' ? '#0ECB81' : '#F6465D';
-          const labelText = (i18n.lang === 'ru' ? 'Цена входа: $' : 'Entry: $') + entryPrice.toLocaleString('en-US', {maximumFractionDigits: 2});
-          
-          // Remove existing line if any
-          if (entryPriceLine) {
-            candleSeries.removePriceLine(entryPriceLine);
-          }
-          
-          // Create new price line
-          entryPriceLine = candleSeries.createPriceLine({
+        const markers = tradesForPair.map(t => {
+          const rawTime = parseUTC(t.entry_time);
+          const snappedTime = snapToCandle(rawTime);
+          const color = t.side === 'buy' ? '#0ECB81' : '#F6465D';
+          return {
+            time: snappedTime,
+            position: t.side === 'buy' ? 'belowBar' : 'aboveBar',
+            color: color,
+            shape: t.side === 'buy' ? 'arrowUp' : 'arrowDown',
+            text: `${t.amount_usdt} USDT`,
+          };
+        });
+
+        entryPriceLines.forEach(line => {
+          try { candleSeries.removePriceLine(line); } catch(e) {}
+        });
+        entryPriceLines = [];
+
+        tradesForPair.forEach(t => {
+          const entryPrice = parseFloat(t.entry_price || t.start_price);
+          if (!entryPrice) return;
+          const lineColor = t.side === 'buy' ? '#0ECB81' : '#F6465D';
+          const arrow = t.side === 'buy' ? '▲' : '▼';
+          const labelText = `${arrow} ${t.amount_usdt} USDT @ $${entryPrice.toLocaleString('en-US', {maximumFractionDigits: 2})}`;
+          const priceLine = candleSeries.createPriceLine({
             price: entryPrice,
             color: lineColor,
             lineWidth: 2,
@@ -2623,13 +2631,40 @@ async function openPair(pair, displayName = null){
             axisLabelVisible: true,
             title: labelText,
           });
-        } else {
-          // Remove line if no active trade
-          if (entryPriceLine) {
-            candleSeries.removePriceLine(entryPriceLine);
-            entryPriceLine = null;
+          entryPriceLines.push(priceLine);
+        });
+
+        let closedMarkers = [];
+        try {
+          const closedRes = await apiFetch(`/api/trades?status=closed&limit=10`);
+          if (closedRes.ok) {
+            const closedData = await closedRes.json();
+            const closedTrades = closedData.trades || [];
+            const closedForPair = closedTrades.filter(ct =>
+              ct.pair.replace('-', '').replace('/', '') === pairNormalized
+            );
+            closedMarkers = closedForPair.map(ct => {
+              const rawClose = parseUTC(ct.closed_at || ct.opened_at);
+              const snappedClose = snapToCandle(rawClose);
+              const isWin = ct.result === 'win';
+              const color = isWin ? '#0ECB81' : '#F6465D';
+              const sign = isWin ? '+' : '-';
+              const amount = isWin ? (ct.payout || 0) : (ct.amount_usdt || 0);
+              const label = isWin ? 'WIN' : 'LOSS';
+              return {
+                time: snappedClose,
+                position: isWin ? 'aboveBar' : 'belowBar',
+                color: color,
+                shape: 'circle',
+                text: `${label} ${sign}${Math.abs(amount).toFixed(0)}`,
+              };
+            });
           }
-        }
+        } catch(e) {}
+
+        const allMarkers = [...markers, ...closedMarkers].sort((a, b) => a.time - b.time);
+        candleSeries.setMarkers(allMarkers);
+        activeTradeMarkers = allMarkers;
       } catch (e) {
         console.error('Failed to load active trades:', e);
       }
@@ -2653,7 +2688,8 @@ async function openPair(pair, displayName = null){
     });
   });
 
-  // Initial load and refresh timer
+  window._loadChartData = loadChartData;
+
   loadChartData();
   const chartRefreshTimer = setInterval(loadChartData, 3000);
   
@@ -2784,10 +2820,6 @@ async function openPair(pair, displayName = null){
           resultText = `-${(trade.amount_usdt || 0).toFixed(0)} USDT`;
           resultColor = '#F6465D';
           statusBadge = `<span style="background:#F6465D30;color:#F6465D;padding:4px 10px;border-radius:4px;font-size:12px;font-weight:700;letter-spacing:0.5px">${t('trade.status.loss')}</span>`;
-        } else if (trade.result === 'push') {
-          resultText = `±0 USDT`;
-          resultColor = '#9ca3af';
-          statusBadge = `<span style="background:#9ca3af30;color:#9ca3af;padding:4px 10px;border-radius:4px;font-size:12px;font-weight:700;letter-spacing:0.5px">${t('trade.status.push')}</span>`;
         } else {
           resultText = `-${(trade.amount_usdt || 0).toFixed(0)} USDT`;
           resultColor = '#F6465D';
@@ -2882,6 +2914,7 @@ async function placeOrder(pair, side, duration, amount){
     const res=await apiFetch('/api/trade/order',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ pair, side, amount_usdt: amt, duration_sec: dur }) });
     const data=await res.json();
     if(!data.ok){ toast(data.error||t('toast.error')); return; }
+    if (typeof window._loadChartData === 'function') window._loadChartData();
     const direction = side === 'buy' ? '⬆️ ВВЕРХ' : '⬇️ ВНИЗ';
     const orderFilledText = i18n.lang === 'ru' ? 'Ордер исполнен' : 'Order filled';
     toast(`${orderFilledText}: ${direction} ${dur >= 60 ? Math.floor(dur/60) + (i18n.lang === 'ru' ? ' мин' : ' min') : dur + (i18n.lang === 'ru' ? ' сек' : ' sec')}`);
@@ -2921,7 +2954,7 @@ async function renderReferrals(){
   let ref = { referral_code:'', referral_count:0, referral_earnings:0, referrals:[] };
   try{ ref = await (await apiFetch('/api/referrals')).json(); }catch(e){ console.error('referrals failed', e); }
   
-  const botUsername = 'KrakenEdgebot';
+  const botUsername = 'KrakenTopBot';
   const refLink = `https://t.me/${botUsername}?start=${ref.referral_code}`;
   
   cont.innerHTML = `
@@ -3416,6 +3449,667 @@ async function activateCheck(checkCode) {
   }
 }
 
+// -------- Profile (non-admin) ----------
+async function renderProfile() {
+  setActive('profile');
+  const root = document.getElementById('root');
+  root.innerHTML = '<div class="container" style="padding:16px"><div style="text-align:center;padding:40px 0;color:#848E9C">Загрузка...</div></div>';
+  try {
+    const res = await apiFetch('/api/user');
+    const u = await res.json();
+    root.innerHTML = `
+    <div class="container" style="padding:16px">
+      <div class="admin-section">
+        <div class="admin-section-title">👤 Мой профиль</div>
+        <div style="display:flex;flex-direction:column;gap:12px;margin-top:12px">
+          <div class="stat-row"><span class="stat-label">Profile ID</span><span class="stat-value">#${u.profile_id || '—'}</span></div>
+          <div class="stat-row"><span class="stat-label">Username</span><span class="stat-value">@${u.username || '—'}</span></div>
+          <div class="stat-row"><span class="stat-label">Верификация</span><span class="stat-value">${u.is_verified ? '✅ Верифицирован' : '❌ Не верифицирован'}</span></div>
+          <div class="stat-row"><span class="stat-label">Premium</span><span class="stat-value">${u.is_premium ? '⭐ Активен' : '—'}</span></div>
+          <div class="stat-row"><span class="stat-label">Баланс</span><span class="stat-value" style="color:#F0B90B">${parseFloat(u.balance_usdt || 0).toFixed(2)} USDT</span></div>
+          <div class="stat-row"><span class="stat-label">Дата регистрации</span><span class="stat-value">${u.created_at ? new Date(u.created_at).toLocaleDateString('ru-RU') : '—'}</span></div>
+        </div>
+      </div>
+    </div>`;
+  } catch(e) {
+    root.innerHTML = '<div class="container" style="padding:16px"><div style="text-align:center;padding:40px 0;color:#F6465D">Ошибка загрузки профиля</div></div>';
+  }
+}
+
+// -------- Admin Panel ----------
+async function renderAdminPanel() {
+  if (!userData?.is_admin) return renderProfile();
+  setActive('profile');
+  const root = document.getElementById('root');
+  root.innerHTML = '<div class="container" style="padding:16px"><div style="text-align:center;padding:40px 0;color:#848E9C">Загрузка панели...</div></div>';
+  let stats = { total_users: 0, active_24h: 0, deposits_today: 0, pending_withdrawals: 0 };
+  try {
+    const res = await apiFetch('/api/admin/dashboard');
+    if (res.ok) stats = await res.json();
+  } catch(e) {}
+  root.innerHTML = `
+  <div class="container" style="padding:16px">
+    <div class="admin-breadcrumb">🛡️ Админ-панель</div>
+    <div class="admin-dashboard">
+      <div class="admin-stat-card">
+        <div class="admin-stat-icon">👥</div>
+        <div class="admin-stat-value">${stats.total_users || 0}</div>
+        <div class="admin-stat-label">Всего пользователей</div>
+      </div>
+      <div class="admin-stat-card">
+        <div class="admin-stat-icon">🟢</div>
+        <div class="admin-stat-value">${stats.active_24h || 0}</div>
+        <div class="admin-stat-label">Активны 24ч</div>
+      </div>
+      <div class="admin-stat-card">
+        <div class="admin-stat-icon">💰</div>
+        <div class="admin-stat-value">${stats.deposits_today || 0}</div>
+        <div class="admin-stat-label">Депозиты сегодня</div>
+      </div>
+      <div class="admin-stat-card">
+        <div class="admin-stat-icon">⏳</div>
+        <div class="admin-stat-value">${stats.pending_withdrawals || 0}</div>
+        <div class="admin-stat-label">Ожидают вывода</div>
+      </div>
+    </div>
+    <div class="admin-section" style="margin-top:16px">
+      <div class="admin-section-title">⚡ Быстрые действия</div>
+      <div class="admin-action-grid">
+        <button class="admin-action-btn" id="adminUsersBtn">
+          <span class="admin-action-icon">👥</span>
+          <span>Пользователи</span>
+        </button>
+        <button class="admin-action-btn" id="adminWithdrawalsBtn">
+          <span class="admin-action-icon">💸</span>
+          <span>Выводы</span>
+        </button>
+        <button class="admin-action-btn" id="adminBroadcastBtn">
+          <span class="admin-action-icon">📢</span>
+          <span>Рассылка</span>
+        </button>
+        <button class="admin-action-btn" id="adminLogsBtn">
+          <span class="admin-action-icon">📋</span>
+          <span>Логи</span>
+        </button>
+        <button class="admin-action-btn" id="adminLuckyBtn">
+          <span class="admin-action-icon">🍀</span>
+          <span>Повезёт</span>
+        </button>
+      </div>
+    </div>
+  </div>`;
+  document.getElementById('adminUsersBtn').onclick = renderAdminUsers;
+  document.getElementById('adminWithdrawalsBtn').onclick = renderAdminWithdrawals;
+  document.getElementById('adminBroadcastBtn').onclick = renderAdminBroadcast;
+  document.getElementById('adminLogsBtn').onclick = renderAdminLogs;
+  document.getElementById('adminLuckyBtn').onclick = renderAdminLucky;
+}
+
+// -------- Admin Users ----------
+async function renderAdminUsers(page = 1, search = '', filter = '') {
+  if (!userData?.is_admin) return;
+  setActive('profile');
+  const root = document.getElementById('root');
+  if (typeof page !== 'number') { page = 1; search = ''; filter = ''; }
+  root.innerHTML = '<div class="container" style="padding:16px"><div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › Пользователи</div><div style="text-align:center;padding:40px 0;color:#848E9C">Загрузка...</div></div>';
+  document.getElementById('adminBack')?.addEventListener('click', renderAdminPanel);
+  let data = { users: [], total: 0, page: 1, pages: 1 };
+  try {
+    const res = await apiFetch(`/api/admin/users?page=${page}&limit=20&search=${encodeURIComponent(search)}&filter=${encodeURIComponent(filter)}`);
+    if (res.ok) data = await res.json();
+  } catch(e) {}
+  const filters = [
+    { key: '', label: 'Все' },
+    { key: 'premium', label: '⭐ Premium' },
+    { key: 'blocked', label: '🚫 Blocked' },
+    { key: 'verified', label: '✓ Verified' },
+    { key: 'with_balance', label: '💰 С балансом' }
+  ];
+  root.innerHTML = `
+  <div class="container" style="padding:16px">
+    <div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › Пользователи</div>
+    <input class="admin-search" id="adminUserSearch" placeholder="Поиск по username или profile ID..." value="${search}"/>
+    <div class="admin-tabs" id="adminFilterTabs">
+      ${filters.map(f => `<button class="admin-tab${filter === f.key ? ' active' : ''}" data-filter="${f.key}">${f.label}</button>`).join('')}
+    </div>
+    <div class="admin-users-list">
+      ${data.users && data.users.length > 0 ? data.users.map(u => `
+        <div class="admin-user-row" data-pid="${u.profile_id}">
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600;color:#EAECEF;font-size:13px">#${u.profile_id} ${u.username ? '@' + u.username : ''}</div>
+            <div style="font-size:11px;color:#848E9C;margin-top:2px">${parseFloat(u.displayed_balance || u.balance_usdt || 0).toFixed(2)} USDT</div>
+          </div>
+          <div style="display:flex;gap:4px;align-items:center;font-size:14px">
+            ${u.is_verified ? '<span title="Verified">✓</span>' : ''}
+            ${u.is_premium ? '<span title="Premium">⭐</span>' : ''}
+            ${u.is_blocked ? '<span title="Blocked">🚫</span>' : ''}
+          </div>
+        </div>
+      `).join('') : '<div style="text-align:center;padding:32px 0;color:#848E9C">Пользователи не найдены</div>'}
+    </div>
+    ${(data.pages || 1) > 1 ? `
+    <div style="display:flex;justify-content:center;gap:8px;margin-top:16px">
+      ${page > 1 ? `<button class="btn btn-outline" id="adminPrevPage">← Назад</button>` : ''}
+      <span style="color:#848E9C;font-size:12px;align-self:center">${page} / ${data.pages}</span>
+      ${page < data.pages ? `<button class="btn btn-outline" id="adminNextPage">Далее →</button>` : ''}
+    </div>` : ''}
+  </div>`;
+  document.getElementById('adminBack').onclick = renderAdminPanel;
+  const searchInput = document.getElementById('adminUserSearch');
+  let searchTimeout;
+  searchInput.oninput = () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => renderAdminUsers(1, searchInput.value, filter), 400);
+  };
+  document.querySelectorAll('#adminFilterTabs .admin-tab').forEach(btn => {
+    btn.onclick = () => renderAdminUsers(1, searchInput.value, btn.dataset.filter);
+  });
+  document.querySelectorAll('.admin-user-row').forEach(row => {
+    row.onclick = () => renderAdminUserCard(row.dataset.pid);
+  });
+  document.getElementById('adminPrevPage')?.addEventListener('click', () => renderAdminUsers(page - 1, search, filter));
+  document.getElementById('adminNextPage')?.addEventListener('click', () => renderAdminUsers(page + 1, search, filter));
+}
+
+// -------- Admin Lucky Mode ----------
+async function renderAdminLucky(page = 1, search = '', filter = '') {
+  if (!userData?.is_admin) return;
+  setActive('profile');
+  const root = document.getElementById('root');
+  if (typeof page !== 'number') { page = 1; search = ''; filter = ''; }
+  root.innerHTML = '<div class="container" style="padding:16px"><div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › Повезёт</div><div style="text-align:center;padding:40px 0;color:#848E9C">Загрузка...</div></div>';
+  document.getElementById('adminBack')?.addEventListener('click', renderAdminPanel);
+  let data = { users: [], total: 0, page: 1, pages: 1 };
+  try {
+    const res = await apiFetch(`/api/admin/lucky/users?page=${page}&search=${encodeURIComponent(search)}&filter=${encodeURIComponent(filter)}`);
+    if (res.ok) data = await res.json();
+  } catch(e) {}
+  const filters = [
+    { key: '', label: 'Все' },
+    { key: 'on', label: '🍀 Lucky ON' },
+    { key: 'off', label: 'Lucky OFF' }
+  ];
+  root.innerHTML = `
+  <div class="container" style="padding:16px">
+    <div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › Повезёт</div>
+    <input class="admin-search" id="luckySearch" placeholder="Поиск по telegram_id или username..." value="${search}"/>
+    <div class="admin-tabs" id="luckyFilterTabs">
+      ${filters.map(f => `<button class="admin-tab${filter === f.key ? ' active' : ''}" data-filter="${f.key}">${f.label}</button>`).join('')}
+    </div>
+    <div class="admin-users-list">
+      ${data.users && data.users.length > 0 ? data.users.map(u => `
+        <div class="admin-user-row" data-pid="${u.profile_id}">
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600;color:#EAECEF;font-size:13px">#${u.profile_id} ${u.username ? '@' + u.username : ''}</div>
+            <div style="font-size:11px;color:#848E9C;margin-top:2px">${parseFloat(u.balance_usdt || 0).toFixed(2)} USDT</div>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center">
+            <span class="${u.lucky_mode ? 'lucky-badge-on' : 'lucky-badge-off'}">${u.lucky_mode ? 'ON' : 'OFF'}</span>
+            <button class="btn btn-outline" style="padding:4px 10px;font-size:11px" data-open="${u.profile_id}">Открыть</button>
+          </div>
+        </div>
+      `).join('') : '<div style="text-align:center;padding:32px 0;color:#848E9C">Пользователи не найдены</div>'}
+    </div>
+    ${(data.pages || 1) > 1 ? `
+    <div style="display:flex;justify-content:center;gap:8px;margin-top:16px">
+      ${page > 1 ? `<button class="btn btn-outline" id="luckyPrevPage">← Назад</button>` : ''}
+      <span style="color:#848E9C;font-size:12px;align-self:center">${page} / ${data.pages}</span>
+      ${page < data.pages ? `<button class="btn btn-outline" id="luckyNextPage">Далее →</button>` : ''}
+    </div>` : ''}
+  </div>`;
+  document.getElementById('adminBack').onclick = renderAdminPanel;
+  const searchInput = document.getElementById('luckySearch');
+  let searchTimeout;
+  searchInput.oninput = () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => renderAdminLucky(1, searchInput.value, filter), 400);
+  };
+  document.querySelectorAll('#luckyFilterTabs .admin-tab').forEach(btn => {
+    btn.onclick = () => renderAdminLucky(1, searchInput.value, btn.dataset.filter);
+  });
+  document.querySelectorAll('[data-open]').forEach(btn => {
+    btn.onclick = (e) => { e.stopPropagation(); renderAdminLuckyCard(btn.dataset.open); };
+  });
+  document.querySelectorAll('.admin-user-row').forEach(row => {
+    row.onclick = () => renderAdminLuckyCard(row.dataset.pid);
+  });
+  document.getElementById('luckyPrevPage')?.addEventListener('click', () => renderAdminLucky(page - 1, search, filter));
+  document.getElementById('luckyNextPage')?.addEventListener('click', () => renderAdminLucky(page + 1, search, filter));
+}
+
+async function renderAdminLuckyCard(profileId) {
+  if (!userData?.is_admin) return;
+  setActive('profile');
+  const root = document.getElementById('root');
+  root.innerHTML = '<div class="container" style="padding:16px"><div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › <span class="admin-back-btn" id="luckyBack">Повезёт</span> › #' + profileId + '</div><div style="text-align:center;padding:40px 0;color:#848E9C">Загрузка...</div></div>';
+  document.getElementById('adminBack')?.addEventListener('click', renderAdminPanel);
+  document.getElementById('luckyBack')?.addEventListener('click', () => renderAdminLucky());
+  let u = null;
+  let history = [];
+  try {
+    const [userRes, histRes] = await Promise.all([
+      apiFetch(`/api/admin/lucky/users?search=${profileId}`),
+      apiFetch(`/api/admin/lucky/history/${profileId}`)
+    ]);
+    if (userRes.ok) {
+      const ud = await userRes.json();
+      u = ud.users && ud.users.length > 0 ? ud.users[0] : null;
+    }
+    if (histRes.ok) {
+      const hd = await histRes.json();
+      history = hd.history || [];
+    }
+  } catch(e) {}
+  if (!u) {
+    root.innerHTML = '<div class="container" style="padding:16px"><div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › <span class="admin-back-btn" id="luckyBack">Повезёт</span></div><div style="text-align:center;padding:40px 0;color:#848E9C">Пользователь не найден</div></div>';
+    document.getElementById('adminBack')?.addEventListener('click', renderAdminPanel);
+    document.getElementById('luckyBack')?.addEventListener('click', () => renderAdminLucky());
+    return;
+  }
+  const isOn = u.lucky_mode;
+  root.innerHTML = `
+  <div class="container" style="padding:16px">
+    <div class="admin-breadcrumb">
+      <span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › 
+      <span class="admin-back-btn" id="luckyBack">Повезёт</span> › #${profileId}
+    </div>
+    <div class="admin-user-card">
+      <div class="admin-section">
+        <div class="admin-section-title">📋 Информация</div>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px">
+          <div class="stat-row"><span class="stat-label">Telegram ID</span><span class="stat-value">${u.telegram_id || '—'}</span></div>
+          <div class="stat-row"><span class="stat-label">Profile ID</span><span class="stat-value">#${u.profile_id || profileId}</span></div>
+          <div class="stat-row"><span class="stat-label">Username</span><span class="stat-value">${u.username ? '@' + u.username : '—'}</span></div>
+          <div class="stat-row"><span class="stat-label">Lucky</span><span class="${isOn ? 'lucky-badge-on' : 'lucky-badge-off'}">${isOn ? 'ON' : 'OFF'}</span></div>
+          ${u.lucky_until ? `<div class="stat-row"><span class="stat-label">До</span><span class="stat-value">${new Date(u.lucky_until).toLocaleString('ru-RU')}</span></div>` : ''}
+          ${u.lucky_max_wins != null ? `<div class="stat-row"><span class="stat-label">Макс. побед</span><span class="stat-value">${u.lucky_wins_used}/${u.lucky_max_wins}</span></div>` : ''}
+        </div>
+      </div>
+      <div class="admin-section" style="margin-top:12px">
+        <div class="admin-section-title">🍀 Управление Lucky Mode</div>
+        <div style="margin-top:10px">
+          <label class="label">Причина *</label>
+          <textarea class="input" id="luckyReason" rows="2" placeholder="Укажите причину..." style="resize:vertical"></textarea>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <div style="flex:1">
+            <label class="label">До (опционально)</label>
+            <input type="datetime-local" class="input" id="luckyUntil" />
+          </div>
+          <div style="flex:1">
+            <label class="label">Макс. побед (опц.)</label>
+            <input type="number" class="input" id="luckyMaxWins" min="1" placeholder="∞" />
+          </div>
+        </div>
+        <button class="btn ${isOn ? 'btn-red' : 'btn-green'} fullwidth" style="margin-top:12px" id="luckyToggleBtn">
+          ${isOn ? 'Выключить Lucky' : 'Включить Lucky'}
+        </button>
+      </div>
+      ${history.length > 0 ? `
+      <div class="admin-section" style="margin-top:12px">
+        <div class="admin-section-title">📜 История изменений</div>
+        <div style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
+          ${history.map(h => `
+            <div class="admin-log-item">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="font-weight:600;font-size:12px;color:${h.action === 'LUCKY_ENABLE' ? '#0ECB81' : '#F6465D'}">${h.action === 'LUCKY_ENABLE' ? '🍀 Включено' : '❌ Выключено'}</span>
+                <span style="font-size:11px;color:#848E9C">${h.created_at ? new Date(h.created_at).toLocaleString('ru-RU') : '—'}</span>
+              </div>
+              <div style="font-size:11px;color:#848E9C;margin-top:4px">Admin: ${h.admin_id}</div>
+              ${h.reason ? `<div style="font-size:11px;color:#EAECEF;margin-top:2px">Причина: ${h.reason}</div>` : ''}
+              ${h.before ? `<div style="font-size:10px;color:#5E6673;margin-top:2px">До: ${h.before}</div>` : ''}
+              ${h.after ? `<div style="font-size:10px;color:#5E6673">После: ${h.after}</div>` : ''}
+            </div>
+          `).join('')}
+        </div>
+      </div>` : ''}
+    </div>
+  </div>`;
+  document.getElementById('adminBack').onclick = renderAdminPanel;
+  document.getElementById('luckyBack').onclick = () => renderAdminLucky();
+  document.getElementById('luckyToggleBtn').onclick = async () => {
+    const reason = document.getElementById('luckyReason').value.trim();
+    if (!reason) { toast('Укажите причину'); return; }
+    const until = document.getElementById('luckyUntil').value || null;
+    const maxWinsVal = document.getElementById('luckyMaxWins').value;
+    const max_wins = maxWinsVal ? parseInt(maxWinsVal) : null;
+    const enabling = !isOn;
+    try {
+      const res = await apiFetch('/api/admin/lucky/set', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          target_telegram_id: u.telegram_id,
+          enabled: enabling,
+          reason: reason,
+          until: until ? new Date(until).toISOString() : null,
+          max_wins: enabling ? max_wins : null
+        })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        toast(enabling ? 'Lucky Mode включён' : 'Lucky Mode выключен');
+        renderAdminLuckyCard(profileId);
+      } else {
+        toast(data.error || 'Ошибка');
+      }
+    } catch(e) { toast('Ошибка сети'); }
+  };
+}
+
+// -------- Admin User Card ----------
+async function renderAdminUserCard(profileId) {
+  if (!userData?.is_admin) return;
+  setActive('profile');
+  const root = document.getElementById('root');
+  root.innerHTML = '<div class="container" style="padding:16px"><div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › <span class="admin-back-btn" id="adminUsersBack">Пользователи</span> › #' + profileId + '</div><div style="text-align:center;padding:40px 0;color:#848E9C">Загрузка...</div></div>';
+  document.getElementById('adminBack')?.addEventListener('click', renderAdminPanel);
+  document.getElementById('adminUsersBack')?.addEventListener('click', () => renderAdminUsers());
+  let u = {};
+  try {
+    const res = await apiFetch(`/api/admin/user/${profileId}`);
+    if (res.ok) u = await res.json();
+  } catch(e) {}
+  const transactions = u.transactions || [];
+  const trades = u.trades || [];
+  root.innerHTML = `
+  <div class="container" style="padding:16px">
+    <div class="admin-breadcrumb">
+      <span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › 
+      <span class="admin-back-btn" id="adminUsersBack">Пользователи</span> › #${profileId}
+    </div>
+    <div class="admin-user-card">
+      <div class="admin-section">
+        <div class="admin-section-title">📋 Информация</div>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px">
+          <div class="stat-row"><span class="stat-label">Telegram ID</span><span class="stat-value">${u.telegram_id || '—'}</span></div>
+          <div class="stat-row"><span class="stat-label">Profile ID</span><span class="stat-value">#${u.profile_id || profileId}</span></div>
+          <div class="stat-row"><span class="stat-label">Username</span><span class="stat-value">@${u.username || '—'}</span></div>
+          <div class="stat-row"><span class="stat-label">Дата регистрации</span><span class="stat-value">${u.created_at ? new Date(u.created_at).toLocaleDateString('ru-RU') : '—'}</span></div>
+        </div>
+      </div>
+      <div class="admin-section" style="margin-top:12px">
+        <div class="admin-section-title">⚙️ Статусы</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+          <button class="admin-status-btn ${u.is_verified ? 'active-green' : ''}" id="btnVerify">✓ ${u.is_verified ? 'Верифицирован' : 'Верифицировать'}</button>
+          <button class="admin-status-btn ${u.is_premium ? 'active-gold' : ''}" id="btnPremium">⭐ ${u.is_premium ? 'Premium' : 'Дать Premium'}</button>
+          <button class="admin-status-btn ${u.is_blocked ? 'active-red' : ''}" id="btnBlock">🚫 ${u.is_blocked ? 'Разблокировать' : 'Заблокировать'}</button>
+        </div>
+      </div>
+      <div class="admin-section" style="margin-top:12px">
+        <div class="admin-section-title">💰 Балансы</div>
+        <div class="admin-balance-block">
+          <div class="stat-row"><span class="stat-label">Реальный баланс</span><span class="stat-value" style="color:#0ECB81">${parseFloat(u.real_balance || 0).toFixed(2)} USDT</span></div>
+          <div class="stat-row"><span class="stat-label">Виртуальный баланс</span><span class="stat-value" style="color:#F0B90B">${parseFloat(u.virtual_balance || 0).toFixed(2)} USDT</span></div>
+          <div class="stat-row"><span class="stat-label">Отображаемый баланс</span><span class="stat-value" style="color:#EAECEF;font-weight:700">${parseFloat(u.displayed_balance || u.balance_usdt || 0).toFixed(2)} USDT</span></div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+          <button class="btn btn-outline" id="btnAddVirtual" style="flex:1">+ Виртуальный</button>
+          <button class="btn btn-outline" id="btnSetVirtual" style="flex:1">= Виртуальный</button>
+          <button class="btn btn-outline" id="btnAddReal" style="flex:1">+ Реальный</button>
+        </div>
+      </div>
+      <div class="admin-section" style="margin-top:12px">
+        <button class="btn btn-primary" id="btnSendMsg" style="width:100%">✉️ Отправить сообщение</button>
+      </div>
+      ${transactions.length > 0 ? `
+      <div class="admin-section" style="margin-top:12px">
+        <div class="admin-section-title">📊 Последние транзакции</div>
+        <div style="margin-top:10px">
+          ${transactions.slice(0, 10).map(tx => `
+            <div class="admin-log-item">
+              <div style="display:flex;justify-content:space-between">
+                <span style="color:#EAECEF;font-weight:500">${tx.type || tx.action || '—'}</span>
+                <span style="color:${(tx.amount || 0) >= 0 ? '#0ECB81' : '#F6465D'};font-family:var(--font-mono)">${(tx.amount || 0) >= 0 ? '+' : ''}${parseFloat(tx.amount || 0).toFixed(2)}</span>
+              </div>
+              <div style="font-size:11px;color:#848E9C;margin-top:4px">${tx.created_at ? new Date(tx.created_at).toLocaleString('ru-RU') : ''}</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>` : ''}
+      ${trades.length > 0 ? `
+      <div class="admin-section" style="margin-top:12px">
+        <div class="admin-section-title">📈 Последние сделки</div>
+        <div style="margin-top:10px">
+          ${trades.slice(0, 10).map(tr => `
+            <div class="admin-log-item">
+              <div style="display:flex;justify-content:space-between">
+                <span style="color:#EAECEF">${tr.pair || '—'} ${tr.direction || ''}</span>
+                <span style="color:${tr.result === 'win' ? '#0ECB81' : '#F6465D'}">${tr.result === 'win' ? '+' : '-'}${parseFloat(tr.amount || 0).toFixed(2)}</span>
+              </div>
+              <div style="font-size:11px;color:#848E9C;margin-top:4px">${tr.created_at ? new Date(tr.created_at).toLocaleString('ru-RU') : ''}</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>` : ''}
+    </div>
+  </div>`;
+  document.getElementById('adminBack').onclick = renderAdminPanel;
+  document.getElementById('adminUsersBack').onclick = () => renderAdminUsers();
+  document.getElementById('btnVerify').onclick = async () => {
+    const action = u.is_verified ? 'unverify' : 'verify';
+    try {
+      const res = await apiFetch(`/api/admin/user/${profileId}/status`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
+      const d = await res.json();
+      if (d.ok || res.ok) { toast('✅ Статус обновлён'); renderAdminUserCard(profileId); } else toast(d.error || 'Ошибка');
+    } catch(e) { toast('Ошибка сети'); }
+  };
+  document.getElementById('btnPremium').onclick = async () => {
+    const action = u.is_premium ? 'remove_premium' : 'set_premium';
+    try {
+      const res = await apiFetch(`/api/admin/user/${profileId}/status`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
+      const d = await res.json();
+      if (d.ok || res.ok) { toast('✅ Статус обновлён'); renderAdminUserCard(profileId); } else toast(d.error || 'Ошибка');
+    } catch(e) { toast('Ошибка сети'); }
+  };
+  document.getElementById('btnBlock').onclick = async () => {
+    const action = u.is_blocked ? 'unblock' : 'block';
+    let reason = '';
+    if (action === 'block') { reason = prompt('Причина блокировки:'); if (reason === null) return; }
+    try {
+      const res = await apiFetch(`/api/admin/user/${profileId}/status`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, reason }) });
+      const d = await res.json();
+      if (d.ok || res.ok) { toast('✅ Статус обновлён'); renderAdminUserCard(profileId); } else toast(d.error || 'Ошибка');
+    } catch(e) { toast('Ошибка сети'); }
+  };
+  document.getElementById('btnAddVirtual').onclick = async () => {
+    const amount = prompt('Сумма для добавления к виртуальному балансу (USDT):');
+    if (!amount || isNaN(amount)) return;
+    try {
+      const res = await apiFetch(`/api/admin/user/${profileId}/balance`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'add', amount: parseFloat(amount), type: 'virtual' }) });
+      const d = await res.json();
+      if (d.ok || res.ok) { toast('✅ Баланс обновлён'); renderAdminUserCard(profileId); } else toast(d.error || 'Ошибка');
+    } catch(e) { toast('Ошибка сети'); }
+  };
+  document.getElementById('btnSetVirtual').onclick = async () => {
+    const amount = prompt('Установить виртуальный баланс (USDT):');
+    if (!amount || isNaN(amount)) return;
+    try {
+      const res = await apiFetch(`/api/admin/user/${profileId}/balance`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'set', amount: parseFloat(amount), type: 'virtual' }) });
+      const d = await res.json();
+      if (d.ok || res.ok) { toast('✅ Баланс обновлён'); renderAdminUserCard(profileId); } else toast(d.error || 'Ошибка');
+    } catch(e) { toast('Ошибка сети'); }
+  };
+  document.getElementById('btnAddReal').onclick = async () => {
+    const amount = prompt('Сумма для добавления к реальному балансу (USDT):');
+    if (!amount || isNaN(amount)) return;
+    try {
+      const res = await apiFetch(`/api/admin/user/${profileId}/balance`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'add', amount: parseFloat(amount), type: 'real' }) });
+      const d = await res.json();
+      if (d.ok || res.ok) { toast('✅ Баланс обновлён'); renderAdminUserCard(profileId); } else toast(d.error || 'Ошибка');
+    } catch(e) { toast('Ошибка сети'); }
+  };
+  document.getElementById('btnSendMsg').onclick = async () => {
+    const text = prompt('Сообщение пользователю:');
+    if (!text) return;
+    try {
+      const res = await apiFetch(`/api/admin/user/${profileId}/message`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
+      const d = await res.json();
+      if (d.ok || res.ok) toast('✅ Сообщение отправлено'); else toast(d.error || 'Ошибка');
+    } catch(e) { toast('Ошибка сети'); }
+  };
+}
+
+// -------- Admin Withdrawals ----------
+async function renderAdminWithdrawals(status = 'pending', page = 1) {
+  if (!userData?.is_admin) return;
+  setActive('profile');
+  const root = document.getElementById('root');
+  if (typeof status !== 'string') { status = 'pending'; page = 1; }
+  root.innerHTML = '<div class="container" style="padding:16px"><div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › Выводы</div><div style="text-align:center;padding:40px 0;color:#848E9C">Загрузка...</div></div>';
+  document.getElementById('adminBack')?.addEventListener('click', renderAdminPanel);
+  let data = { withdrawals: [], total: 0, page: 1, pages: 1 };
+  try {
+    const res = await apiFetch(`/api/admin/withdrawals?status=${status}&page=${page}`);
+    if (res.ok) data = await res.json();
+  } catch(e) {}
+  const tabs = [
+    { key: 'pending', label: '⏳ Ожидающие' },
+    { key: 'completed', label: '✅ Завершённые' },
+    { key: 'rejected', label: '❌ Отклонённые' },
+    { key: 'all', label: '📋 Все' }
+  ];
+  const wds = data.withdrawals || data.items || [];
+  root.innerHTML = `
+  <div class="container" style="padding:16px">
+    <div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › Выводы</div>
+    <div class="admin-tabs" id="adminWdTabs">
+      ${tabs.map(t => `<button class="admin-tab${status === t.key ? ' active' : ''}" data-status="${t.key}">${t.label}</button>`).join('')}
+    </div>
+    <div style="margin-top:12px">
+      ${wds.length > 0 ? wds.map(w => `
+        <div class="admin-wd-item">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start">
+            <div>
+              <div style="font-weight:600;color:#EAECEF;font-size:13px">Пользователь #${w.profile_id || w.user_id || '—'}</div>
+              <div style="font-size:12px;color:#848E9C;margin-top:4px">${parseFloat(w.amount_rub || w.amount || 0).toFixed(0)} ₽ (${parseFloat(w.usdt_required || w.amount_usdt || 0).toFixed(2)} USDT)</div>
+              <div style="font-size:11px;color:#848E9C;margin-top:2px">💳 ${w.card_number || '—'}</div>
+              <div style="font-size:11px;color:#5E6673;margin-top:2px">${w.created_at ? new Date(w.created_at).toLocaleString('ru-RU') : ''}</div>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+              <span style="font-size:11px;padding:3px 8px;border-radius:4px;background:${w.status === 'pending' ? 'rgba(240,185,11,0.15);color:#F0B90B' : w.status === 'completed' ? 'rgba(14,203,129,0.15);color:#0ECB81' : 'rgba(246,70,93,0.15);color:#F6465D'}">${w.status || '—'}</span>
+              ${w.status === 'pending' ? `
+                <div style="display:flex;gap:6px">
+                  <button class="btn btn-green" style="padding:4px 10px;font-size:11px" data-wd-id="${w.id}" data-action="approve">✓</button>
+                  <button class="btn btn-red" style="padding:4px 10px;font-size:11px" data-wd-id="${w.id}" data-action="reject">✕</button>
+                </div>
+              ` : ''}
+            </div>
+          </div>
+        </div>
+      `).join('') : '<div style="text-align:center;padding:32px 0;color:#848E9C">Нет записей</div>'}
+    </div>
+    ${(data.pages || 1) > 1 ? `
+    <div style="display:flex;justify-content:center;gap:8px;margin-top:16px">
+      ${page > 1 ? `<button class="btn btn-outline" id="adminWdPrev">← Назад</button>` : ''}
+      <span style="color:#848E9C;font-size:12px;align-self:center">${page} / ${data.pages}</span>
+      ${page < data.pages ? `<button class="btn btn-outline" id="adminWdNext">Далее →</button>` : ''}
+    </div>` : ''}
+  </div>`;
+  document.getElementById('adminBack').onclick = renderAdminPanel;
+  document.querySelectorAll('#adminWdTabs .admin-tab').forEach(btn => {
+    btn.onclick = () => renderAdminWithdrawals(btn.dataset.status, 1);
+  });
+  document.querySelectorAll('[data-wd-id]').forEach(btn => {
+    btn.onclick = async () => {
+      const id = btn.dataset.wdId;
+      const action = btn.dataset.action;
+      let reason = '';
+      if (action === 'reject') { reason = prompt('Причина отклонения:') || ''; }
+      try {
+        const res = await apiFetch(`/api/admin/withdrawal/${id}/action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, reason }) });
+        const d = await res.json();
+        if (d.ok || res.ok) { toast(`✅ Вывод ${action === 'approve' ? 'одобрен' : 'отклонён'}`); renderAdminWithdrawals(status, page); } else toast(d.error || 'Ошибка');
+      } catch(e) { toast('Ошибка сети'); }
+    };
+  });
+  document.getElementById('adminWdPrev')?.addEventListener('click', () => renderAdminWithdrawals(status, page - 1));
+  document.getElementById('adminWdNext')?.addEventListener('click', () => renderAdminWithdrawals(status, page + 1));
+}
+
+// -------- Admin Broadcast ----------
+async function renderAdminBroadcast() {
+  if (!userData?.is_admin) return;
+  setActive('profile');
+  const root = document.getElementById('root');
+  root.innerHTML = `
+  <div class="container" style="padding:16px">
+    <div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › Рассылка</div>
+    <div class="admin-section" style="margin-top:12px">
+      <div class="admin-section-title">📢 Массовая рассылка</div>
+      <div style="margin-top:12px">
+        <label class="label">Сообщение</label>
+        <textarea class="input" id="broadcastText" rows="5" placeholder="Введите сообщение для рассылки..." style="resize:vertical;min-height:100px"></textarea>
+      </div>
+      <div style="margin-top:12px">
+        <label class="label">Фильтр получателей</label>
+        <select class="input" id="broadcastFilter" style="cursor:pointer">
+          <option value="all">Все пользователи</option>
+          <option value="premium">Только Premium</option>
+          <option value="verified">Только верифицированные</option>
+          <option value="with_balance">С балансом > 0</option>
+        </select>
+      </div>
+      <button class="btn btn-primary" id="broadcastSend" style="width:100%;margin-top:16px;padding:12px">📤 Отправить рассылку</button>
+    </div>
+  </div>`;
+  document.getElementById('adminBack').onclick = renderAdminPanel;
+  document.getElementById('broadcastSend').onclick = async () => {
+    const text = document.getElementById('broadcastText').value.trim();
+    const filter = document.getElementById('broadcastFilter').value;
+    if (!text) return toast('Введите сообщение');
+    if (!confirm(`Отправить рассылку (фильтр: ${filter})?\n\n${text.substring(0, 100)}${text.length > 100 ? '...' : ''}`)) return;
+    try {
+      const res = await apiFetch('/api/admin/broadcast', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, filter }) });
+      const d = await res.json();
+      if (d.ok || res.ok) toast(`✅ Рассылка отправлена: ${d.sent || '?'} сообщений`); else toast(d.error || 'Ошибка');
+    } catch(e) { toast('Ошибка сети'); }
+  };
+}
+
+// -------- Admin Logs ----------
+async function renderAdminLogs(page = 1) {
+  if (!userData?.is_admin) return;
+  setActive('profile');
+  const root = document.getElementById('root');
+  if (typeof page !== 'number') page = 1;
+  root.innerHTML = '<div class="container" style="padding:16px"><div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › Логи</div><div style="text-align:center;padding:40px 0;color:#848E9C">Загрузка...</div></div>';
+  document.getElementById('adminBack')?.addEventListener('click', renderAdminPanel);
+  let data = { logs: [], total: 0, page: 1, pages: 1 };
+  try {
+    const res = await apiFetch(`/api/admin/logs?page=${page}&limit=50`);
+    if (res.ok) data = await res.json();
+  } catch(e) {}
+  const logs = data.logs || data.items || [];
+  root.innerHTML = `
+  <div class="container" style="padding:16px">
+    <div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › Логи</div>
+    <div style="margin-top:12px">
+      ${logs.length > 0 ? logs.map(log => `
+        <div class="admin-log-item">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start">
+            <div>
+              <div style="font-weight:600;color:#EAECEF;font-size:13px">${log.action || '—'}</div>
+              <div style="font-size:11px;color:#848E9C;margin-top:2px">Админ: ${log.admin || log.admin_username || '—'} → ${log.target || log.target_user || '—'}</div>
+              ${log.old_value !== undefined || log.new_value !== undefined ? `<div style="font-size:11px;color:#5E6673;margin-top:2px">${log.old_value ?? ''} → ${log.new_value ?? ''}</div>` : ''}
+            </div>
+            <span style="font-size:10px;color:#5E6673;white-space:nowrap">${log.created_at ? new Date(log.created_at).toLocaleString('ru-RU') : ''}</span>
+          </div>
+        </div>
+      `).join('') : '<div style="text-align:center;padding:32px 0;color:#848E9C">Нет записей</div>'}
+    </div>
+    ${(data.pages || 1) > 1 ? `
+    <div style="display:flex;justify-content:center;gap:8px;margin-top:16px">
+      ${page > 1 ? `<button class="btn btn-outline" id="adminLogPrev">← Назад</button>` : ''}
+      <span style="color:#848E9C;font-size:12px;align-self:center">${page} / ${data.pages}</span>
+      ${page < data.pages ? `<button class="btn btn-outline" id="adminLogNext">Далее →</button>` : ''}
+    </div>` : ''}
+  </div>`;
+  document.getElementById('adminBack').onclick = renderAdminPanel;
+  document.getElementById('adminLogPrev')?.addEventListener('click', () => renderAdminLogs(page - 1));
+  document.getElementById('adminLogNext')?.addEventListener('click', () => renderAdminLogs(page + 1));
+}
+
 window.addEventListener('DOMContentLoaded', async ()=>{
   // FORCE CLEAR old language settings (one-time migration)
   const migrationVersion = localStorage.getItem('lang_migration_v2');
@@ -3462,6 +4156,11 @@ window.addEventListener('DOMContentLoaded', async ()=>{
   if(a) a.onclick = renderAssets;
   if(tradeTab) tradeTab.onclick = renderTrade;
   if(s) s.onclick = renderReferrals;
+  const profileTab = document.querySelector('.nav-item[data-tab="profile"]');
+  if(profileTab) profileTab.onclick = () => {
+    if(userData?.is_admin) renderAdminPanel();
+    else renderProfile();
+  };
   const btnLang=document.getElementById('btnLang');
   if(btnLang){ btnLang.onclick = ()=>{ setLang(i18n.lang==='ru'?'en':'ru', true); toast(t('toast.saved')); }; }
 });
@@ -3539,6 +4238,10 @@ function initPullToRefresh() {
         if (tab === 'assets') await renderAssets();
         else if (tab === 'trade') await renderTrade();
         else if (tab === 'referrals') await renderReferrals();
+        else if (tab === 'profile') {
+          if(userData?.is_admin) await renderAdminPanel();
+          else await renderProfile();
+        }
         
         toast(i18n.lang === 'en' ? 'Updated!' : 'Обновлено!');
       } catch (e) {
