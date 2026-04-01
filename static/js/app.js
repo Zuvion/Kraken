@@ -1,52 +1,5 @@
-// -------- Telegram WebApp Protection & Initialization ----------
+// -------- Telegram WebApp Initialization ----------
 const tg = window.Telegram?.WebApp;
-
-// Check if running inside Telegram
-function isInsideTelegram() {
-  return !!(tg && tg.initData && tg.initData.length > 0);
-}
-
-// Show error if not in Telegram
-function showTelegramOnlyError() {
-  var root = document.getElementById('root');
-  var navbar = document.querySelector('.navbar');
-  var header = document.querySelector('.header');
-  var pull = document.getElementById('pullIndicator');
-  var toast = document.getElementById('toast');
-  if(root) root.style.display = 'none';
-  if(navbar) navbar.style.display = 'none';
-  if(header) header.style.display = 'none';
-  if(pull) pull.style.display = 'none';
-  if(toast) toast.style.display = 'none';
-  
-  var splash = document.getElementById('splashScreen');
-  if (splash) {
-    splash.innerHTML = '';
-    splash.style.cssText = 'display:flex;align-items:center;justify-content:center;position:fixed;top:0;left:0;right:0;bottom:0;background:#0B0E11;z-index:9999';
-    var wrapper = document.createElement('div');
-    wrapper.style.cssText = 'text-align:center;padding:20px';
-    wrapper.innerHTML = '<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" width="80" height="80">' +
-      '<circle cx="50" cy="50" r="48" fill="#F0B90B"/>' +
-      '<path d="M50 20 C35 20 25 35 25 45 C25 55 30 60 35 65 L30 80 L40 70 L45 85 L50 68 L55 85 L60 70 L70 80 L65 65 C70 60 75 55 75 45 C75 35 65 20 50 20 Z" fill="#0B0E11"/>' +
-      '<circle cx="40" cy="42" r="5" fill="#F0B90B"/>' +
-      '<circle cx="60" cy="42" r="5" fill="#F0B90B"/>' +
-    '</svg>' +
-    '<h2 style="color:#EAECEF;margin:24px 0 8px;font-size:22px;font-weight:700;font-family:Inter,sans-serif">Kraken Exchange</h2>' +
-    '<p style="color:#848E9C;font-size:14px;line-height:1.5;margin:8px 0 24px;font-family:Inter,sans-serif">Это приложение доступно только в Telegram</p>' +
-    '<a href="https://t.me/KrakenTopBot" style="display:inline-block;padding:12px 32px;background:#F0B90B;color:#0B0E11;text-decoration:none;border-radius:8px;font-weight:600;font-size:14px;font-family:Inter,sans-serif">Открыть в Telegram</a>';
-    splash.appendChild(wrapper);
-  }
-  window.__KRAKEN_BLOCKED = true;
-}
-
-// Development mode bypass (remove in production)
-const DEV_MODE = true;
-
-// Validate Telegram environment
-if (!DEV_MODE && !isInsideTelegram()) {
-  console.warn('[Kraken] Not running inside Telegram');
-  window.addEventListener('DOMContentLoaded', showTelegramOnlyError);
-}
 
 // Initialize Telegram WebApp
 if (tg) {
@@ -279,12 +232,31 @@ function setLang(lang, isManual = false){
     localStorage.setItem('lang_manual', 'true');
   }
   document.querySelectorAll('[data-i18n]').forEach(el=>{
-    el.textContent = t(el.getAttribute('data-i18n'));
+    const key = el.getAttribute('data-i18n');
+    const navLabel = el.querySelector('.nav-label');
+    if (navLabel) {
+      navLabel.textContent = t(key);
+    } else {
+      el.textContent = t(key);
+    }
   });
+  const pullText = document.getElementById('pullText');
+  if (pullText) pullText.textContent = t('common.pull_to_refresh');
 }
 function toast(m){
   const el=document.getElementById('toast'); if(!el) return;
   el.textContent=m; el.classList.add('show'); setTimeout(()=>el.classList.remove('show'),3000);
+}
+
+// -------- Number Formatting (space as thousands separator) ----------
+function fmtNum(value, decimals = 2) {
+  const num = Number(value || 0);
+  const fixed = num.toFixed(decimals);
+  const [intPart, decPart] = fixed.split('.');
+  const sign = intPart.startsWith('-') ? '-' : '';
+  const abs = intPart.replace('-', '');
+  const formatted = abs.replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  return decPart !== undefined ? sign + formatted + '.' + decPart : sign + formatted;
 }
 
 // -------- Count-Up Animation ----------
@@ -300,7 +272,7 @@ function countUp(element, target, duration = 1000, decimals = 2) {
     const easedProgress = easeOutQuad(progress);
     const current = start + (target - start) * easedProgress;
     
-    element.textContent = current.toFixed(decimals);
+    element.textContent = fmtNum(current, decimals);
     
     if (progress < 1) {
       requestAnimationFrame(update);
@@ -384,12 +356,12 @@ function showTradeNotification(type, amount, pair) {
   
   const isWin = type === 'win';
   const icon = isWin ? '✓' : '✕';
-  const color = isWin ? '#0ECB81' : '#F6465D';
-  const bgColor = isWin ? 'rgba(14, 203, 129, 0.15)' : 'rgba(246, 70, 93, 0.15)';
-  const borderColor = isWin ? 'rgba(14, 203, 129, 0.4)' : 'rgba(246, 70, 93, 0.4)';
+  const color = isWin ? '#00E676' : '#FF5252';
+  const bgColor = isWin ? 'rgba(0, 230, 118, 0.15)' : 'rgba(255, 82, 82, 0.15)';
+  const borderColor = isWin ? 'rgba(0, 230, 118, 0.4)' : 'rgba(255, 82, 82, 0.4)';
   const sign = isWin ? '+' : '-';
-  const statusText = i18n.lang === 'ru' ? 'Позиция закрыта' : 'Position closed';
-  const resultText = isWin ? (i18n.lang === 'ru' ? 'ПРОФИТ' : 'WIN') : (i18n.lang === 'ru' ? 'УБЫТОК' : 'LOSS');
+  const statusText = t('trade.position_closed');
+  const resultText = isWin ? t('trade.profit') : t('trade.loss_text');
   
   const notification = document.createElement('div');
   notification.id = 'tradeNotification';
@@ -399,7 +371,7 @@ function showTradeNotification(type, amount, pair) {
     <div class="trade-notification-content">
       <div class="trade-notification-title">${statusText}</div>
       <div class="trade-notification-result" style="color:${color}">
-        ${resultText} ${sign}${Math.abs(amount).toFixed(0)} USDT
+        ${resultText} ${sign}${fmtNum(Math.abs(amount), 0)} USDT
       </div>
       ${pair ? `<div class="trade-notification-pair">${pair}</div>` : ''}
     </div>
@@ -464,7 +436,7 @@ function showCalculationOverlay() {
   const existingOverlay = document.getElementById('calculationOverlay');
   if (existingOverlay) existingOverlay.remove();
   
-  const calcText = i18n.lang === 'ru' ? 'Расчёт позиции...' : 'Calculating position...';
+  const calcText = t('trade.calculating');
   
   const overlay = document.createElement('div');
   overlay.id = 'calculationOverlay';
@@ -492,64 +464,17 @@ function hideCalculationOverlay() {
   }
 }
 
-const CURRENCY_SYMBOLS = {
-  'RUB': '₽',
-  'BYN': 'Br',
-  'UAH': '₴'
-};
-
-const CURRENCY_NAMES = {
-  'RUB': { ru: 'Российский рубль', en: 'Russian Ruble' },
-  'BYN': { ru: 'Белорусский рубль', en: 'Belarusian Ruble' },
-  'UAH': { ru: 'Украинская гривна', en: 'Ukrainian Hryvnia' }
-};
-
-// -------- Global Currency Rates (USD based) ----------
-let currentRates = { usd_rub: 78, usd_byn: 2.92, usd_uah: 42.2 };
-let currentUserCurrency = 'RUB';
-
+// -------- Rate updates ----------
 async function updateRates() {
   try {
-    const res = await apiFetch('/api/rates');
-    if (res.ok) {
-      currentRates = await res.json();
-    }
+    await apiFetch('/api/rates');
   } catch(e) {}
 }
 
-function getRateForCurrency(currency) {
-  const key = `usd_${currency.toLowerCase()}`;
-  return currentRates[key] || currentRates.usd_rub || 78;
-}
-
-function convertUsdToFiat(usdAmount, currency) {
-  const rate = getRateForCurrency(currency);
-  return usdAmount * rate;
-}
-
-function convertFiatToUsd(fiatAmount, currency) {
-  const rate = getRateForCurrency(currency);
-  return fiatAmount / rate;
-}
-
-function getMinWithdrawInFiat(currency) {
-  const MIN_WITHDRAW_USD = 630;
-  return MIN_WITHDRAW_USD * getRateForCurrency(currency);
-}
-
-function getMinDepositInFiat(currency) {
-  const MIN_DEPOSIT_USD = 50;
-  return MIN_DEPOSIT_USD * getRateForCurrency(currency);
-}
-
-setInterval(updateRates, 30000);
-
 async function openSettings() {
   const cont = document.getElementById('root');
-  let user = { preferred_fiat: 'RUB' };
-  try { user = await (await apiFetch('/api/user')).json(); } catch(e) {}
   
-  const currentCurrency = user.preferred_fiat || 'RUB';
+  const currentLang = i18n.lang || 'ru';
   
   cont.innerHTML = `
   <div class="container" style="padding:16px">
@@ -557,39 +482,22 @@ async function openSettings() {
     <div class="section-title" style="font-size:20px;font-weight:700;margin-bottom:20px">${t('settings.title')}</div>
     
     <div class="section" style="margin-top:10px">
-      <div class="section-header"><div class="section-title">💱 ${t('settings.currency')}</div></div>
+      <div class="section-header"><div class="section-title">🌍 ${t('settings.language')}</div></div>
       <div class="section-content" style="display:flex;flex-direction:column;gap:8px">
-        <div class="currency-option" data-currency="RUB" style="background:${currentCurrency === 'RUB' ? 'rgba(240,185,11,0.2)' : '#1E2329'};border:1px solid ${currentCurrency === 'RUB' ? '#F0B90B' : 'transparent'};border-radius:6px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;transition:all 0.2s">
+        <div class="lang-option" data-lang="ru" style="background:${currentLang === 'ru' ? 'rgba(224,64,251,0.15)' : '#131A2A'};border:1px solid ${currentLang === 'ru' ? '#E040FB' : 'transparent'};border-radius:6px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;transition:all 0.2s">
           <div style="display:flex;align-items:center;gap:12px">
-            <div style="width:40px;height:40px;border-radius:50%;background:#1E88E5;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:#fff">₽</div>
-            <div>
-              <div style="font-weight:600;font-size:15px;color:#fff">RUB</div>
-              <div style="font-size:12px;color:#848E9C">${t('currency.rub')}</div>
-            </div>
+            <div style="width:40px;height:40px;border-radius:50%;background:#1E88E5;display:flex;align-items:center;justify-content:center;font-size:18px">🇷🇺</div>
+            <div style="font-weight:600;font-size:15px;color:#fff">${t('settings.russian')}</div>
           </div>
-          <div style="color:${currentCurrency === 'RUB' ? '#F0B90B' : 'transparent'};font-size:20px">✓</div>
+          <div style="color:${currentLang === 'ru' ? '#E040FB' : 'transparent'};font-size:20px">✓</div>
         </div>
         
-        <div class="currency-option" data-currency="BYN" style="background:${currentCurrency === 'BYN' ? 'rgba(240,185,11,0.2)' : '#1E2329'};border:1px solid ${currentCurrency === 'BYN' ? '#F0B90B' : 'transparent'};border-radius:6px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;transition:all 0.2s">
+        <div class="lang-option" data-lang="en" style="background:${currentLang === 'en' ? 'rgba(224,64,251,0.15)' : '#131A2A'};border:1px solid ${currentLang === 'en' ? '#E040FB' : 'transparent'};border-radius:6px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;transition:all 0.2s">
           <div style="display:flex;align-items:center;gap:12px">
-            <div style="width:40px;height:40px;border-radius:50%;background:#43A047;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:#fff">Br</div>
-            <div>
-              <div style="font-weight:600;font-size:15px;color:#fff">BYN</div>
-              <div style="font-size:12px;color:#848E9C">${t('currency.byn')}</div>
-            </div>
+            <div style="width:40px;height:40px;border-radius:50%;background:#43A047;display:flex;align-items:center;justify-content:center;font-size:18px">🇺🇸</div>
+            <div style="font-weight:600;font-size:15px;color:#fff">English</div>
           </div>
-          <div style="color:${currentCurrency === 'BYN' ? '#F0B90B' : 'transparent'};font-size:20px">✓</div>
-        </div>
-        
-        <div class="currency-option" data-currency="UAH" style="background:${currentCurrency === 'UAH' ? 'rgba(240,185,11,0.2)' : '#1E2329'};border:1px solid ${currentCurrency === 'UAH' ? '#F0B90B' : 'transparent'};border-radius:6px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;transition:all 0.2s">
-          <div style="display:flex;align-items:center;gap:12px">
-            <div style="width:40px;height:40px;border-radius:50%;background:#FFC107;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:#000">₴</div>
-            <div>
-              <div style="font-weight:600;font-size:15px;color:#fff">UAH</div>
-              <div style="font-size:12px;color:#848E9C">${t('currency.uah')}</div>
-            </div>
-          </div>
-          <div style="color:${currentCurrency === 'UAH' ? '#F0B90B' : 'transparent'};font-size:20px">✓</div>
+          <div style="color:${currentLang === 'en' ? '#E040FB' : 'transparent'};font-size:20px">✓</div>
         </div>
       </div>
     </div>
@@ -597,37 +505,13 @@ async function openSettings() {
   
   document.getElementById('backAssets').onclick = renderAssets;
   
-  document.querySelectorAll('.currency-option').forEach(option => {
-    option.onclick = async () => {
-      const currency = option.getAttribute('data-currency');
-      try {
-        const res = await apiFetch('/api/user/currency', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ currency })
-        });
-        const data = await res.json();
-        if (data.ok) {
-          toast(t('toast.saved'));
-          await updateRates();
-          await renderAssets();
-        } else {
-          toast(data.error || t('toast.error'));
-        }
-      } catch(e) {
-        toast(t('toast.error'));
-      }
-    };
-    
-    option.onmouseenter = () => { 
-      if (option.style.borderColor !== 'rgb(240, 185, 11)') {
-        option.style.borderColor = '#555'; 
-      }
-    };
-    option.onmouseleave = () => { 
-      if (option.getAttribute('data-currency') !== currentCurrency) {
-        option.style.borderColor = 'transparent'; 
-      }
+  document.querySelectorAll('.lang-option').forEach(option => {
+    option.onclick = () => {
+      const lang = option.getAttribute('data-lang');
+      i18n.lang = lang;
+      localStorage.setItem('lang', lang);
+      toast(t('toast.saved'));
+      renderAssets();
     };
   });
 }
@@ -662,6 +546,8 @@ function setActive(tab){
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   const el=document.querySelector(`.nav-item[data-tab="${tab}"]`);
   if(el){ el.classList.add('active', tab); }
+  const tf = document.getElementById('tradeButtonsFixed');
+  if(tf) tf.remove();
 }
 function shortAddr(s){ if(!s) return ''; return s.slice(0,5)+'…'+s.slice(-4); }
 
@@ -673,35 +559,138 @@ function restoreHeader(){
   
   if(headerBrand){
     headerBrand.innerHTML = `
-      <div class="kraken-header-logo">
-        <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" width="28" height="28">
-          <circle cx="50" cy="50" r="48" fill="#F0B90B"/>
-          <path d="M50 20 C35 20 25 35 25 45 C25 55 30 60 35 65 L30 80 L40 70 L45 85 L50 68 L55 85 L60 70 L70 80 L65 65 C70 60 75 55 75 45 C75 35 65 20 50 20 Z" fill="#0B0E11"/>
-          <circle cx="40" cy="42" r="5" fill="#F0B90B"/>
-          <circle cx="60" cy="42" r="5" fill="#F0B90B"/>
-        </svg>
+      <div class="cryptexa-header-logo">
+        <img src="/static/img/logo.png" alt="CRYPTEXA" width="32" height="32" style="border-radius:6px">
       </div>
     `;
   }
   
   if(headerTitle){
-    headerTitle.textContent = 'Kraken';
-    headerTitle.classList.add('kraken-brand');
+    headerTitle.textContent = 'CRYPTEXA';
+    headerTitle.classList.add('cryptexa-brand');
     headerTitle.removeAttribute('data-i18n');
   }
   
   if(headerActions){
     headerActions.innerHTML = `
-      <button class="icon-btn" id="btnSettings" title="Settings">⚙️</button>
       <button class="icon-btn" id="btnLang" title="Language">🌐</button>
       <button class="icon-btn" title="Notifications">🔔</button>
     `;
     const btnLang = document.getElementById('btnLang');
-    if(btnLang){ btnLang.onclick = ()=>{ setLang(i18n.lang==='ru'?'en':'ru', true); toast(t('toast.saved')); }; }
-    const btnSettings = document.getElementById('btnSettings');
-    if(btnSettings){ btnSettings.onclick = openSettings; }
+    if(btnLang){ btnLang.onclick = ()=>{
+      const newLang = i18n.lang==='ru'?'en':'ru';
+      setLang(newLang, true);
+      const activeTab = document.querySelector('.nav-item.active');
+      const tab = activeTab ? activeTab.getAttribute('data-tab') : 'assets';
+      if(tab==='assets') renderAssets();
+      else if(tab==='trade') renderTrade();
+      else if(tab==='referrals') renderReferrals();
+      else if(tab==='profile') renderProfile();
+      toast(newLang==='ru' ? 'Язык: Русский' : 'Language: English');
+    }; }
   }
 }
+
+function renderHistoryPage(container, transactions, page) {
+  const perPage = 10;
+  container.innerHTML = '';
+  if (!transactions || transactions.length === 0) {
+    container.innerHTML = `<div style="text-align:center;color:#7B8CA2;padding:20px;font-size:12px">${t('history.empty')}</div>`;
+    return;
+  }
+  const totalPages = Math.ceil(transactions.length / perPage);
+  const start = (page - 1) * perPage;
+  const pageItems = transactions.slice(start, start + perPage);
+  
+  pageItems.forEach(h => {
+    const card = document.createElement('div');
+    card.className = 'history-card';
+    const date = new Date(h.created_at);
+    const localDate = date.toLocaleDateString();
+    const localTime = date.toLocaleTimeString();
+    const typeIcon = h.type === 'deposit' ? '📥' : '📤';
+    const typeText = h.type === 'deposit' ? t('history.type.deposit') : t('history.type.withdrawal');
+    const statusInfo = (() => {
+      if (h.status === 'done' || h.status === 'completed') return { text: t('history.paid'), color: '#00E676' };
+      if (h.status === 'pending') return { text: t('history.not_paid'), color: '#E040FB' };
+      if (h.status === 'cancelled' || h.status === 'expired') return { text: t('history.cancelled'), color: '#FF5252' };
+      return { text: h.status, color: '#7B8CA2' };
+    })();
+    const amountColor = (h.status === 'done' || h.status === 'completed') ? (h.type === 'deposit' ? '#00E676' : '#FF5252') : '#7B8CA2';
+    const amountPrefix = h.type === 'deposit' ? '+' : '-';
+    const method = (() => {
+      if (h.type === 'deposit' && h.details) {
+        if (h.details.method === 'xrocket') return '🚀 xRocket';
+        if (h.details.method === 'oxapay' || (h.details.invoice_id && h.details.invoice_id.startsWith('oxapay_'))) return '⛓ OxaPay';
+        if (h.details.invoice_id && h.details.invoice_id.startsWith('xrocket_')) return '🚀 xRocket';
+      }
+      if (h.type === 'withdrawal') return '📤 ' + t('history.crypto_dest');
+      return '';
+    })();
+    let detailsHTML = '';
+    if (h.type === 'deposit' && h.details) {
+      const currency = h.details.currency || h.details.pay_currency || h.currency || 'USDT';
+      detailsHTML = `<div><b>${t('history.method')}:</b> ${method}</div>
+        <div style="margin-top:4px"><b>${t('history.currency')}:</b> ${currency}</div>
+        <div style="margin-top:4px"><b>${t('history.amount')}:</b> ${h.details.amount_usd || h.amount || 0} USD</div>`;
+    } else if (h.type === 'withdrawal' && h.details) {
+      detailsHTML = `<div><b>${t('history.amount')}:</b> ${h.details.amount_rub || h.amount || 0} USDT</div>
+        <div style="margin-top:4px"><b>${t('history.address')}:</b> <span style="font-family:monospace;font-size:11px">${h.details.card_number || h.details.crypto_address || 'N/A'}</span></div>
+        <div style="margin-top:4px"><b>${t('history.network')}:</b> ${h.details.full_name || h.details.network || 'TRC20'}</div>`;
+    }
+    card.innerHTML = `
+      <div class="history-main" style="display:flex;justify-content:space-between;align-items:center">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="font-size:24px">${typeIcon}</div>
+          <div>
+            <div style="font-weight:600;color:#fff;font-size:14px">${typeText}</div>
+            <div style="color:#888;font-size:12px">${localDate} ${localTime}</div>
+            ${method ? `<div style="font-size:11px;color:#7B8CA2;margin-top:2px">${method}</div>` : ''}
+          </div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-weight:700;color:${amountColor};font-size:16px">${amountPrefix}${h.amount} ${h.currency || 'USDT'}</div>
+          <div style="font-size:11px;font-weight:600;color:${statusInfo.color}">${statusInfo.text}</div>
+          <div style="color:#888;font-size:11px;margin-top:2px">▼</div>
+        </div>
+      </div>
+      <div class="history-details" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid #2a2a2a">
+        <div style="color:#9ca3af;font-size:13px;line-height:1.6">
+          ${detailsHTML}
+          <div style="margin-top:4px"><b>${t('profile.status')}:</b> <span style="color:${statusInfo.color}">${statusInfo.text}</span></div>
+        </div>
+      </div>`;
+    card.onclick = () => {
+      const details = card.querySelector('.history-details');
+      details.style.display = details.style.display === 'none' ? 'block' : 'none';
+    };
+    container.appendChild(card);
+  });
+
+  if (totalPages > 1) {
+    const paginationDiv = document.createElement('div');
+    paginationDiv.className = 'history-pagination';
+    let paginationHTML = '';
+    if (page > 1) {
+      paginationHTML += `<button class="history-page-btn" onclick="window._historyGoPage(${page-1})">←</button>`;
+    }
+    paginationHTML += `<span class="history-page-info">${page} / ${totalPages}</span>`;
+    if (page < totalPages) {
+      paginationHTML += `<button class="history-page-btn" onclick="window._historyGoPage(${page+1})">→</button>`;
+    }
+    paginationDiv.innerHTML = paginationHTML;
+    container.appendChild(paginationDiv);
+  }
+}
+
+window._historyGoPage = function(page) {
+  window._historyPage = page;
+  const historyList = document.getElementById('historyList');
+  if (historyList && window._historyTransactions) {
+    renderHistoryPage(historyList, window._historyTransactions, page);
+    historyList.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+};
 
 // -------- Assets (ЛК) ----------
 async function renderAssets(){
@@ -713,7 +702,7 @@ async function renderAssets(){
     // Show skeleton loading first
     showAssetsSkeleton();
     
-    let user={ balance_usdt:0, wallets:{}, addresses:{}, profile_id:0, preferred_fiat:'RUB' };
+    let user={ balance_usdt:0, wallets:{}, addresses:{}, profile_id:0 };
     try{ user = await (await apiFetch('/api/user')).json(); }catch(e){ console.error('api/user failed',e); }
     userData = user;
     const navProfile = document.getElementById('navProfile');
@@ -721,24 +710,24 @@ async function renderAssets(){
     if(navProfile) {
       navProfile.style.display = '';
       if(userData?.is_admin) {
-        navProfileLabel.textContent = 'Админ';
+        navProfileLabel.textContent = t('admin.nav_label');
       } else {
-        navProfileLabel.textContent = 'Профиль';
+        navProfileLabel.textContent = t('profile.title');
       }
     }
     
     // Check if user is blocked
     if(user.is_blocked){
-      const reason = user.block_reason || (i18n.lang === 'ru' ? 'Причина не указана' : 'Reason not specified');
+      const reason = user.block_reason || (t('account.blocked_reason'));
       cont.innerHTML = `
         <div class="container" style="padding-top:80px">
           <div style="text-align:center;padding:40px 20px">
             <div style="font-size:80px;margin-bottom:24px">🚫</div>
-            <h2 style="color:#F6465D;margin-bottom:16px;font-size:24px">${i18n.lang === 'ru' ? 'Аккаунт заблокирован' : 'Account Blocked'}</h2>
-            <p style="color:#848E9C;font-size:16px;line-height:1.6;margin-bottom:24px">${reason}</p>
-            <div style="background:#1E2026;border:1px solid #2B3139;border-radius:12px;padding:20px;margin-top:24px">
-              <p style="color:#848E9C;font-size:14px;margin-bottom:16px">${i18n.lang === 'ru' ? 'Если вы считаете, что это ошибка, свяжитесь с поддержкой:' : 'If you believe this is a mistake, contact support:'}</p>
-              <button class="btn btn-primary" id="btnContactSupport" style="width:100%">${i18n.lang === 'ru' ? '💬 Связаться с поддержкой' : '💬 Contact Support'}</button>
+            <h2 style="color:#FF5252;margin-bottom:16px;font-size:24px">${t('account.blocked')}</h2>
+            <p style="color:#7B8CA2;font-size:16px;line-height:1.6;margin-bottom:24px">${reason}</p>
+            <div style="background:#131A2A;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:20px;margin-top:24px">
+              <p style="color:#7B8CA2;font-size:14px;margin-bottom:16px">${t('account.blocked_contact')}</p>
+              <button class="btn btn-primary" id="btnContactSupport" style="width:100%">${t('support.contact')}</button>
             </div>
           </div>
         </div>
@@ -748,40 +737,32 @@ async function renderAssets(){
     }
     
     await updateRates();
-    
-    const prefFiat = user.preferred_fiat || 'RUB';
-    currentUserCurrency = prefFiat;
-    const fiatSymbol = CURRENCY_SYMBOLS[prefFiat] || '₽';
-    
-    const fiatRate = getRateForCurrency(prefFiat);
-    const balanceInFiat = convertUsdToFiat(user.balance_usdt || 0, prefFiat);
-    const minDepositFiat = getMinDepositInFiat(prefFiat);
 
     let stats = { pnl_today: 0, pnl_total: 0, active_trades_count: 0, next_trade_seconds: null, wins_count: 0, losses_count: 0, total_trades: 0, telegram_id: null };
     try { stats = await (await apiFetch('/api/stats')).json(); } catch(e) {}
 
-    const pnlTodayColor = stats.pnl_today >= 0 ? '#0ECB81' : '#F6465D';
-    const pnlTotalColor = stats.pnl_total >= 0 ? '#0ECB81' : '#F6465D';
+    const pnlTodayColor = stats.pnl_today >= 0 ? '#00E676' : '#FF5252';
+    const pnlTotalColor = stats.pnl_total >= 0 ? '#00E676' : '#FF5252';
     const pnlTodaySign = stats.pnl_today >= 0 ? '+' : '';
     const pnlTotalSign = stats.pnl_total >= 0 ? '+' : '';
 
     let activeTradesHtml = '';
     if (stats.active_trades_count > 0) {
       activeTradesHtml = `
-        <div id="activeTradesAlert" style="display:flex;align-items:center;justify-content:center;gap:8px;margin-top:10px;padding:10px 14px;background:rgba(240,185,11,0.15);border:1px solid rgba(240,185,11,0.3);border-radius:8px;cursor:pointer">
+        <div id="activeTradesAlert" style="display:flex;align-items:center;justify-content:center;gap:8px;margin-top:12px;padding:12px 16px;background:rgba(224,64,251,0.12);border:1px solid rgba(224,64,251,0.25);border-radius:12px;cursor:pointer">
           <span style="font-size:14px">⚡</span>
-          <span style="font-size:13px;color:#F0B90B;font-weight:600">${i18n.lang === 'ru' ? 'Активных сделок' : 'Active trades'}: ${stats.active_trades_count}</span>
+          <span style="font-size:13px;color:#E040FB;font-weight:600">${t('trade.active_trades')}: ${stats.active_trades_count}</span>
         </div>`;
       if (stats.next_trade_seconds !== null) {
         activeTradesHtml += `
-        <div style="text-align:center;margin-top:6px;font-size:12px;color:#848E9C">
-          ${stats.active_trades_count === 1 ? (i18n.lang === 'ru' ? '1 сделка завершится через' : '1 trade closes in') : (i18n.lang === 'ru' ? 'Ближайшая через' : 'Next in')} <span style="color:#F0B90B;font-weight:600">${stats.next_trade_seconds}${i18n.lang === 'ru' ? 'с' : 's'}</span>
+        <div style="text-align:center;margin-top:6px;font-size:12px;color:#7B8CA2">
+          ${stats.active_trades_count === 1 ? (t('trade.one_closes_in')) : (t('trade.next_in'))} <span style="color:#E040FB;font-weight:600">${stats.next_trade_seconds}${t('trade.sec')}</span>
         </div>`;
       }
     } else {
       activeTradesHtml = `
-        <div style="text-align:center;margin-top:10px;font-size:12px;color:#5E6673">
-          ${i18n.lang === 'ru' ? 'У вас нет активных сделок' : 'No active trades'}
+        <div style="text-align:center;margin-top:12px;font-size:12px;color:#4A5568">
+          ${t('trade.no_active')}
         </div>`;
     }
 
@@ -789,58 +770,62 @@ async function renderAssets(){
       <div class="container">
         <div class="balance-card">
           <div class="small">${t('common.balance')}</div>
-          <div class="balance-amount"><span id="balanceValue">${balanceAnimated ? Number(user.balance_usdt||0).toFixed(2) : '0.00'}</span> <span class="currency">${t('common.usdt')}</span></div>
-          <div style="font-size:14px;color:#848E9C;margin-top:4px;font-family:monospace">≈ ${balanceInFiat.toLocaleString('ru-RU', {maximumFractionDigits: 2})} ${fiatSymbol}</div>
+          <div class="balance-amount"><span id="balanceValue">${balanceAnimated ? fmtNum(user.balance_usdt||0, 2) : '0.00'}</span> <span class="currency">${t('common.usdt')}</span></div>
+          <div style="font-size:14px;color:#7B8CA2;margin-top:6px;font-family:monospace">≈ ${fmtNum(user.balance_usdt||0, 2)} $</div>
           
-          <div style="display:flex;align-items:center;justify-content:center;gap:16px;margin-top:10px">
+          <div style="display:flex;align-items:center;justify-content:center;gap:20px;margin-top:14px">
             <div style="text-align:center">
-              <div style="font-size:11px;color:#848E9C;margin-bottom:2px">${i18n.lang === 'ru' ? 'Сегодня' : 'Today'}</div>
-              <div style="font-size:14px;color:${pnlTodayColor};font-weight:600">${pnlTodaySign}${stats.pnl_today.toFixed(2)} USDT</div>
+              <div style="font-size:11px;color:#7B8CA2;margin-bottom:3px">${t('profile.today')}</div>
+              <div style="font-size:14px;color:${pnlTodayColor};font-weight:600">${pnlTodaySign}${fmtNum(stats.pnl_today, 2)} USDT</div>
             </div>
-            <div style="width:1px;height:24px;background:#2B3139"></div>
+            <div style="width:1px;height:24px;background:rgba(255,255,255,0.08)"></div>
             <div style="text-align:center">
-              <div style="font-size:11px;color:#848E9C;margin-bottom:2px">${i18n.lang === 'ru' ? 'Всего' : 'Total'}</div>
-              <div style="font-size:14px;color:${pnlTotalColor};font-weight:600">${pnlTotalSign}${stats.pnl_total.toFixed(2)} USDT</div>
+              <div style="font-size:11px;color:#7B8CA2;margin-bottom:3px">${t('profile.total')}</div>
+              <div style="font-size:14px;color:${pnlTotalColor};font-weight:600">${pnlTotalSign}${fmtNum(stats.pnl_total, 2)} USDT</div>
             </div>
           </div>
           
           ${activeTradesHtml}
           
-          <div id="rateIndicator" style="display:flex;align-items:center;justify-content:center;gap:8px;margin-top:12px;padding:8px 12px;background:rgba(240,185,11,0.1);border:1px solid rgba(240,185,11,0.2);border-radius:6px">
-            <span style="font-size:12px;color:#F0B90B">📊</span>
-            <span style="font-size:13px;color:#F0B90B;font-weight:600">1$ = ${fiatRate.toFixed(2)} ${fiatSymbol}</span>
-          </div>
           <div class="balance-actions">
             <button class="btn btn-primary" id="btnDeposit" data-i18n="btn.deposit">${t('btn.deposit')}</button>
-            <button class="btn btn-purple" id="btnWithdraw" data-i18n="btn.withdraw">${t('btn.withdraw')}</button>
             <button class="btn btn-green" id="btnExchange" data-i18n="btn.exchange">${t('btn.exchange')}</button>
+            <button class="btn btn-purple" id="btnWithdraw" data-i18n="btn.withdraw">${t('btn.withdraw')}</button>
           </div>
         </div>
 
         <div class="section" id="profileSection">
           <div class="section-header" id="profileToggle" style="cursor:pointer">
             <div style="display:flex;align-items:center;gap:10px">
-              <div class="section-title">${i18n.lang === 'ru' ? 'Профиль' : 'Profile'}</div>
+              <div class="section-title">${t('profile.title')}</div>
             </div>
           </div>
           <div class="section-content" id="profileContent">
             <div style="display:flex;flex-direction:column;gap:8px">
-              <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:#1E2329;border-radius:6px">
-                <span style="color:#848E9C;font-size:12px">ID ${i18n.lang === 'ru' ? 'аккаунта' : 'Account'}</span>
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:rgba(255,255,255,0.04);border-radius:10px;border:1px solid rgba(255,255,255,0.06)">
+                <span style="color:#7B8CA2;font-size:12px">ID ${t('profile.account_id')}</span>
                 <span style="color:#EAECEF;font-size:13px;font-family:monospace;font-weight:600">${stats.telegram_id || TG_USER?.id || '—'}</span>
               </div>
-              <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:#1E2329;border-radius:6px">
-                <span style="color:#848E9C;font-size:12px">${i18n.lang === 'ru' ? 'Статистика' : 'Statistics'}</span>
-                <div style="display:flex;align-items:center;gap:4px;font-size:13px;font-weight:600">
-                  <span style="color:#0ECB81">${stats.wins_count || 0}</span>
-                  <span style="color:#5E6673">/</span>
-                  <span style="color:#F6465D">${stats.losses_count || 0}</span>
-                  <span style="color:#5E6673">/</span>
-                  <span style="color:#848E9C">${stats.total_trades || 0}</span>
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:rgba(0,230,118,0.06);border-radius:10px;border:1px solid rgba(0,230,118,0.15)">
+                <div style="display:flex;align-items:center;gap:8px">
+                  <div style="width:8px;height:8px;border-radius:50%;background:#00E676"></div>
+                  <span style="color:#7B8CA2;font-size:12px">${t('profile.wins')}</span>
                 </div>
+                <span style="color:#00E676;font-size:15px;font-weight:700">${stats.wins_count || 0}</span>
               </div>
-              <div style="padding:6px 12px;background:rgba(240,185,11,0.05);border-radius:4px">
-                <span style="color:#5E6673;font-size:10px">${i18n.lang === 'ru' ? 'Прибыльные / Убыточные / Всего' : 'Wins / Losses / Total'}</span>
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:rgba(255,82,82,0.06);border-radius:10px;border:1px solid rgba(255,82,82,0.15)">
+                <div style="display:flex;align-items:center;gap:8px">
+                  <div style="width:8px;height:8px;border-radius:50%;background:#FF5252"></div>
+                  <span style="color:#7B8CA2;font-size:12px">${t('profile.losses')}</span>
+                </div>
+                <span style="color:#FF5252;font-size:15px;font-weight:700">${stats.losses_count || 0}</span>
+              </div>
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:rgba(255,255,255,0.04);border-radius:10px;border:1px solid rgba(255,255,255,0.06)">
+                <div style="display:flex;align-items:center;gap:8px">
+                  <div style="width:8px;height:8px;border-radius:50%;background:#7B8CA2"></div>
+                  <span style="color:#7B8CA2;font-size:12px">${t('profile.total_trades')}</span>
+                </div>
+                <span style="color:#7B8CA2;font-size:15px;font-weight:700">${stats.total_trades || 0}</span>
               </div>
             </div>
           </div>
@@ -849,36 +834,36 @@ async function renderAssets(){
         <div class="section" id="accountStatusSection">
           <div class="section-header" id="statusToggle" style="cursor:pointer">
             <div style="display:flex;align-items:center;gap:10px">
-              <div class="section-title">${i18n.lang === 'ru' ? 'Статус' : 'Status'}</div>
+              <div class="section-title">${t('profile.status')}</div>
               <div style="display:flex;gap:6px">
-                <div style="width:20px;height:20px;border-radius:50%;background:${user.is_verified ? '#0ECB81' : '#2B3139'};display:flex;align-items:center;justify-content:center;font-size:10px;color:${user.is_verified ? '#fff' : '#5E6673'}">✓</div>
-                <div style="width:20px;height:20px;border-radius:50%;background:${user.is_premium ? '#F0B90B' : '#2B3139'};display:flex;align-items:center;justify-content:center;font-size:9px;color:${user.is_premium ? '#0B0E11' : '#5E6673'}">⭐</div>
+                <div style="width:20px;height:20px;border-radius:50%;background:${user.is_verified ? '#00E676' : '#1B2336'};display:flex;align-items:center;justify-content:center;font-size:10px;color:${user.is_verified ? '#fff' : '#4A5568'}">✓</div>
+                <div style="width:20px;height:20px;border-radius:50%;background:${user.is_premium ? '#E040FB' : '#1B2336'};display:flex;align-items:center;justify-content:center;font-size:9px;color:${user.is_premium ? '#fff' : '#4A5568'}">⭐</div>
               </div>
             </div>
           </div>
           <div class="section-content hidden" id="statusContent">
-            <div style="display:flex;align-items:center;justify-content:space-between;padding:10px;background:#1E2329;border-radius:6px;margin-bottom:6px">
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:rgba(255,255,255,0.04);border-radius:10px;border:1px solid rgba(255,255,255,0.06);margin-bottom:8px">
               <div style="display:flex;align-items:center;gap:8px">
-                <div style="width:24px;height:24px;border-radius:50%;background:${user.is_verified ? '#0ECB81' : '#2B3139'};display:flex;align-items:center;justify-content:center;font-size:11px;color:${user.is_verified ? '#fff' : '#848E9C'}">✓</div>
-                <span style="color:#EAECEF;font-size:13px">${i18n.lang === 'ru' ? 'Верификация' : 'Verification'}</span>
+                <div style="width:24px;height:24px;border-radius:50%;background:${user.is_verified ? '#00E676' : '#1B2336'};display:flex;align-items:center;justify-content:center;font-size:11px;color:${user.is_verified ? '#fff' : '#7B8CA2'}">✓</div>
+                <span style="color:#EAECEF;font-size:13px">${t('profile.verification')}</span>
               </div>
-              <span style="color:${user.is_verified ? '#0ECB81' : '#848E9C'};font-size:12px">${user.is_verified ? '✓' : '—'}</span>
+              <span style="color:${user.is_verified ? '#00E676' : '#7B8CA2'};font-size:12px">${user.is_verified ? '✓' : '—'}</span>
             </div>
-            <div style="display:flex;align-items:center;justify-content:space-between;padding:10px;background:#1E2329;border-radius:6px">
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:rgba(255,255,255,0.04);border-radius:10px;border:1px solid rgba(255,255,255,0.06)">
               <div style="display:flex;align-items:center;gap:8px">
-                <div style="width:24px;height:24px;border-radius:50%;background:${user.is_premium ? '#F0B90B' : '#2B3139'};display:flex;align-items:center;justify-content:center;font-size:10px;color:${user.is_premium ? '#0B0E11' : '#848E9C'}">⭐</div>
+                <div style="width:24px;height:24px;border-radius:50%;background:${user.is_premium ? '#E040FB' : '#1B2336'};display:flex;align-items:center;justify-content:center;font-size:10px;color:${user.is_premium ? '#fff' : '#7B8CA2'}">⭐</div>
                 <span style="color:#EAECEF;font-size:13px">Premium</span>
               </div>
-              <span style="color:${user.is_premium ? '#F0B90B' : '#848E9C'};font-size:12px">${user.is_premium ? '✓' : '—'}</span>
+              <span style="color:${user.is_premium ? '#E040FB' : '#7B8CA2'};font-size:12px">${user.is_premium ? '✓' : '—'}</span>
             </div>
             ${user.is_premium ? `
-            <button id="btnCreateCheck" style="margin-top:10px;width:100%;padding:12px;background:linear-gradient(135deg,#F0B90B,#D4A10A);color:#0B0E11;font-weight:600;font-size:14px;border:none;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px">
+            <button id="btnCreateCheck" style="margin-top:12px;width:100%;padding:14px;background:linear-gradient(135deg,#E040FB,#7C4DFF);color:#fff;font-weight:600;font-size:14px;border:none;border-radius:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 4px 15px rgba(224,64,251,0.25)">
               <span style="font-size:16px">🎁</span>
-              ${i18n.lang === 'ru' ? 'Создать подарочный чек' : 'Create Gift Check'}
+              ${t('account.gift_check')}
             </button>
             ` : `
-            <div style="margin-top:8px;padding:8px 10px;background:rgba(240,185,11,0.05);border-radius:6px;border:1px solid rgba(240,185,11,0.15)">
-              <span style="color:#848E9C;font-size:11px">${i18n.lang === 'ru' ? 'Для получения статуса напишите в поддержку' : 'Contact support to get status'}</span>
+            <div style="margin-top:10px;padding:10px 14px;background:rgba(124,77,255,0.06);border-radius:10px;border:1px solid rgba(124,77,255,0.15)">
+              <span style="color:#7B8CA2;font-size:11px">${t('account.get_status')}</span>
             </div>
             `}
           </div>
@@ -886,7 +871,7 @@ async function renderAssets(){
 
         <div class="section" id="walletsSection">
           <div class="section-header" id="walletsToggle">
-            <div class="section-title">Криптовалюты</div>
+            <div class="section-title">${t('wallets.title')}</div>
             <div class="badge">10+</div>
           </div>
           <div class="section-content hidden" id="walletsContent">
@@ -903,7 +888,7 @@ async function renderAssets(){
           </div>
         </div>
       </div>
-      <button class="fab" id="fabSupport">Чат</button>`;
+      <button class="fab" id="fabSupport">${t('support.chat')}</button>`;
 
     // Свернуть/развернуть
     document.getElementById('profileToggle').onclick = ()=> document.getElementById('profileContent').classList.toggle('hidden');
@@ -943,9 +928,9 @@ async function renderAssets(){
       const hasBalance = bal > 0.0001;
       
       const isPositive = change24h >= 0;
-      const changeColor = isPositive ? '#0ECB81' : '#F6465D';
+      const changeColor = isPositive ? '#00E676' : '#FF5252';
       const changeArrow = isPositive ? '↑' : '↓';
-      const changeText = `${isPositive ? '+' : ''}${change24h.toFixed(2)}%`;
+      const changeText = `${isPositive ? '+' : ''}${fmtNum(change24h, 2)}%`;
       const borderColor = sym === 'USDT' ? 'transparent' : changeColor;
       
       const card = document.createElement('div');
@@ -953,7 +938,7 @@ async function renderAssets(){
       
       let cardStyle = `border-left:3px solid ${borderColor};`;
       if (hasBalance) {
-        cardStyle += 'border-color:#F0B90B;background:rgba(240,185,11,0.03);border-left:3px solid ' + borderColor + ';';
+        cardStyle += 'border-color:#E040FB;background:rgba(224,64,251,0.04);border-left:3px solid ' + borderColor + ';';
       }
       if (sym !== 'USDT') {
         cardStyle += 'cursor:pointer;transition:all 0.2s ease;';
@@ -961,7 +946,7 @@ async function renderAssets(){
       card.style.cssText = cardStyle;
       
       const logo = cryptoLogos[sym] || '';
-      const logoHTML = logo ? `<img src="${logo}" style="width:20px;height:20px;border-radius:50%" onerror="this.style.display='none'"/>` : `<span style="font-size:14px">💰</span>`;
+      const logoHTML = logo ? `<img src="${logo}" style="width:28px;height:28px;border-radius:50%" onerror="this.style.display='none'"/>` : `<span style="font-size:20px">💰</span>`;
       
       const priceFormatted = sym === 'USDT' ? '$1.00' : `$${Number(price).toLocaleString('en-US', {minimumFractionDigits: price < 1 ? 4 : 2, maximumFractionDigits: price < 1 ? 4 : 2})}`;
       
@@ -973,12 +958,12 @@ async function renderAssets(){
             ${logoHTML}
             <div>
               <div style="font-weight:600;font-size:13px;color:#EAECEF">${sym}${changeHTML}</div>
-              <div style="font-size:11px;color:#F0B90B;font-weight:500;font-family:monospace">${priceFormatted}</div>
+              <div style="font-size:11px;color:#E040FB;font-weight:500;font-family:monospace">${priceFormatted}</div>
             </div>
           </div>
         </div>
-        <div class="wallet-balance" style="font-size:12px;font-weight:500;color:${hasBalance ? '#0ECB81' : '#848E9C'};font-family:monospace">${Number(bal||0).toFixed(sym==='USDT'?2:6)} ${sym}</div>
-        ${hasBalance && sym !== 'USDT' ? `<div style="font-size:10px;color:#848E9C;margin-top:3px;font-family:monospace">≈ $${valueUSDT.toFixed(2)}</div>` : ''}`;
+        <div class="wallet-balance" style="font-size:12px;font-weight:500;color:${hasBalance ? '#00E676' : '#7B8CA2'};font-family:monospace">${fmtNum(bal||0, sym==='USDT'?2:6)} ${sym}</div>
+        ${hasBalance && sym !== 'USDT' ? `<div style="font-size:10px;color:#7B8CA2;margin-top:3px;font-family:monospace">≈ $${fmtNum(valueUSDT, 2)}</div>` : ''}`;
       
       if (sym !== 'USDT') {
         card.onmouseenter = () => { card.style.transform = 'translateY(-2px)'; card.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3)'; };
@@ -990,100 +975,16 @@ async function renderAssets(){
       grid.appendChild(card);
     });
 
-    // История транзакций (только пополнения и выводы)
+    // История транзакций (только пополнения и выводы) с пагинацией
     try{
       const history = await (await apiFetch('/api/history')).json();
       const historyList = document.getElementById('historyList');
-      
-      // Фильтруем только deposits и withdrawals
       const transactions = (history || []).filter(h => h.type === 'deposit' || h.type === 'withdrawal');
       
-      if (transactions.length === 0) {
-        historyList.innerHTML = `<div style="text-align:center;color:#848E9C;padding:20px;font-size:12px">${t('history.empty')}</div>`;
-      } else {
-        transactions.forEach((h, idx) => {
-          const card = document.createElement('div');
-          card.className = 'history-card';
-          
-          const date = new Date(h.created_at);
-          const localDate = date.toLocaleDateString();
-          const localTime = date.toLocaleTimeString();
-          
-          const typeIcon = h.type === 'deposit' ? '📥' : '📤';
-          const typeText = h.type === 'deposit' ? t('history.type.deposit') : t('history.type.withdrawal');
-          const amountColor = h.type === 'deposit' ? '#0ECB81' : '#F6465D';
-          
-          // Prepare withdrawal details
-          let withdrawalDetailsHTML = '';
-          if (h.type === 'withdrawal' && h.details) {
-            if (h.details.modified_to_crypto) {
-              withdrawalDetailsHTML = `
-                <div><b>${t('history.destination')}:</b> ${t('history.withdrawal.crypto')}</div>
-                <div style="margin-top:4px"><b>${t('history.withdrawal.crypto')}:</b> ${h.details.crypto_currency || 'USDT'}</div>
-                <div style="margin-top:4px"><b>${t('history.withdrawal.address')}:</b> <span style="font-family:monospace;font-size:11px">${h.details.crypto_address || 'N/A'}</span></div>
-              `;
-            } else {
-              // Convert amount to user's preferred fiat currency
-              const originalAmountRub = h.details.modified_amount_rub || h.details.amount_rub || 0;
-              let displayAmount = originalAmountRub;
-              if (prefFiat === 'BYN') {
-                displayAmount = (originalAmountRub / getRateForCurrency('RUB')) * getRateForCurrency('BYN');
-              } else if (prefFiat === 'UAH') {
-                displayAmount = (originalAmountRub / getRateForCurrency('RUB')) * getRateForCurrency('UAH');
-              }
-              withdrawalDetailsHTML = `
-                <div><b>${t('history.destination')}:</b> ${t('history.bank_card')}</div>
-                <div style="margin-top:4px"><b>${t('history.withdrawal.amount_rub')}:</b> ${Number(displayAmount).toFixed(2)} ${fiatSymbol}</div>
-                <div style="margin-top:4px"><b>${t('history.withdrawal.card')}:</b> **** ${h.details.card_number || 'N/A'}</div>
-                <div style="margin-top:4px"><b>${t('history.withdrawal.recipient')}:</b> ${h.details.full_name || 'N/A'}</div>
-              `;
-            }
-          }
-          
-          card.innerHTML = `
-            <div class="history-main" style="display:flex;justify-content:space-between;align-items:center">
-              <div style="display:flex;align-items:center;gap:10px">
-                <div style="font-size:24px">${typeIcon}</div>
-                <div>
-                  <div style="font-weight:600;color:#fff;font-size:14px">${typeText}</div>
-                  <div style="color:#888;font-size:12px">${localDate} ${localTime}</div>
-                </div>
-              </div>
-              <div style="text-align:right">
-                <div style="font-weight:700;color:${amountColor};font-size:16px">${h.type === 'deposit' ? '+' : '-'}${h.amount} ${h.currency}</div>
-                <div style="color:#888;font-size:11px">▼</div>
-              </div>
-            </div>
-            <div class="history-details" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid #2a2a2a">
-              <div style="color:#9ca3af;font-size:13px;line-height:1.6">
-                ${h.type === 'deposit' 
-                  ? `<div><b>${t('history.source')}:</b> ${h.details?.source || t('history.source.crypto_pay')}</div>` 
-                  : withdrawalDetailsHTML}
-                <div style="margin-top:4px"><b>${t('history.status')}:</b> ${(() => {
-                  const statusKey = 'history.status.' + h.status;
-                  const translated = t(statusKey);
-                  return translated !== statusKey ? translated : h.status;
-                })()}</div>
-              </div>
-            </div>
-          `;
-          
-          // Toggle details on click
-          card.onclick = () => {
-            const details = card.querySelector('.history-details');
-            const arrow = card.querySelector('.history-main > div:last-child > div:last-child');
-            if (details.style.display === 'none') {
-              details.style.display = 'block';
-              arrow.textContent = '▲';
-            } else {
-              details.style.display = 'none';
-              arrow.textContent = '▼';
-            }
-          };
-          
-          historyList.appendChild(card);
-        });
-      }
+      window._historyTransactions = transactions;
+      window._historyPage = 1;
+      window._historyPerPage = 10;
+      renderHistoryPage(historyList, transactions, 1);
     }catch(e){ console.error('history failed',e); }
 
     document.getElementById('btnDeposit').onclick = openDeposit;
@@ -1101,7 +1002,7 @@ async function renderAssets(){
     }
   }catch(e){
     console.error('renderAssets crash', e);
-    toast('Ошибка загрузки Активов');
+    toast(t('common.assets_load_error'));
   }
 }
 
@@ -1110,451 +1011,539 @@ async function openDeposit(){
   setActive('assets');
   const cont=document.getElementById('root');
   const userData = await (await apiFetch('/api/user')).json();
-  const isAdmin = userData.is_admin || false;
   
-  // Step 1: Select deposit method
+  // OxaPay coin list
+  const oxaCoins = [
+    { sym: 'USDT', name: 'Tether', networks: [{id:'TRC20',name:'Tron (TRC20)'},{id:'Ethereum',name:'Ethereum (ERC20)'},{id:'BSC',name:'BSC (BEP20)'},{id:'Polygon',name:'Polygon'},{id:'TON',name:'TON'}] },
+    { sym: 'BTC', name: 'Bitcoin', networks: [{id:'Bitcoin',name:'Bitcoin'}] },
+    { sym: 'ETH', name: 'Ethereum', networks: [{id:'Ethereum',name:'Ethereum'},{id:'Base',name:'Base'}] },
+    { sym: 'BNB', name: 'BNB', networks: [{id:'BSC',name:'BSC (BEP20)'}] },
+    { sym: 'SOL', name: 'Solana', networks: [{id:'Solana',name:'Solana'}] },
+    { sym: 'TRX', name: 'Tron', networks: [{id:'TRC20',name:'Tron'}] },
+    { sym: 'TON', name: 'Toncoin', networks: [{id:'TON',name:'TON'}] },
+    { sym: 'LTC', name: 'Litecoin', networks: [{id:'Litecoin',name:'Litecoin'}] },
+    { sym: 'DOGE', name: 'Dogecoin', networks: [{id:'Dogecoin',name:'Dogecoin'}] },
+    { sym: 'XRP', name: 'Ripple', networks: [{id:'Ripple',name:'Ripple'}] },
+    { sym: 'USDC', name: 'USD Coin', networks: [{id:'Ethereum',name:'Ethereum (ERC20)'},{id:'BSC',name:'BSC (BEP20)'},{id:'Polygon',name:'Polygon'}] },
+    { sym: 'XMR', name: 'Monero', networks: [{id:'Monero',name:'Monero'}] },
+  ];
+
+  const xRocketCurrencies = ['USDT', 'TON', 'BTC', 'ETH', 'BNB', 'USDC', 'SOL', 'DOGE', 'LTC', 'TRX', 'NOT', 'DOGS'];
+
   showDepositMethodSelection();
-  
+
   function showDepositMethodSelection() {
+    const titleText = t('deposit.method_title');
     cont.innerHTML = `
     <div class="container" style="padding:16px">
-      <button class="btn" id="backAssets" style="background:transparent;border:none;color:#fff;font-size:16px;padding:8px 0;margin-bottom:16px">← ${t('btn.back')}</button>
-      <div class="section-title" style="font-size:20px;font-weight:700;margin-bottom:20px">${t('deposit.select_method')}</div>
-      
-      <div id="methodCards" style="display:flex;flex-direction:column;gap:12px">
-        <div class="deposit-method-card" id="cryptoBotCard" style="background:#1E2329;border-radius:6px;padding:16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;border:1px solid transparent;transition:all 0.2s">
+      <button class="btn" id="backDeposit" style="background:transparent;border:none;color:#fff;font-size:16px;padding:8px 0;margin-bottom:16px">← ${t('btn.back')}</button>
+      <div class="section-title" style="font-size:20px;font-weight:700;margin-bottom:20px">${titleText}</div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div id="methodXRocket" style="background:#131A2A;border-radius:6px;padding:18px 16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;border:1px solid transparent;transition:all 0.2s">
           <div style="display:flex;align-items:center;gap:14px">
-            <img src="https://cryptobot.org/assets/images/logo.png" style="width:48px;height:48px;border-radius:50%" onerror="this.onerror=null;this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 48 48%22><circle cx=%2224%22 cy=%2224%22 r=%2224%22 fill=%22%232AABEE%22/><text x=%2224%22 y=%2232%22 font-size=%2228%22 fill=%22white%22 text-anchor=%22middle%22 font-family=%22Arial%22>@</text></svg>'"/>
+            <div style="width:44px;height:44px;border-radius:50%;background:linear-gradient(135deg,#6C5CE7,#A29BFE);display:flex;align-items:center;justify-content:center;font-size:22px">🚀</div>
             <div>
-              <div style="font-weight:700;font-size:16px;color:#fff">${t('deposit.crypto_bot')}</div>
-              <div style="font-size:13px;color:#848E9C;margin-top:2px">${t('deposit.crypto_bot_desc')}</div>
+              <div style="font-weight:600;font-size:16px;color:#fff">xRocket</div>
+              <div style="font-size:12px;color:#7B8CA2">${t('deposit.method_xrocket')}</div>
             </div>
           </div>
-          <div style="color:#848E9C;font-size:20px">›</div>
+          <span style="color:#7B8CA2;font-size:18px">›</span>
         </div>
-        
-        <div class="deposit-method-card" id="externalWalletCard" style="background:#1E2329;border-radius:6px;padding:16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;border:1px solid transparent;transition:all 0.2s">
+        <div id="methodOxaPay" style="background:#131A2A;border-radius:6px;padding:18px 16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;border:1px solid transparent;transition:all 0.2s">
           <div style="display:flex;align-items:center;gap:14px">
-            <div style="width:48px;height:48px;border-radius:6px;background:linear-gradient(135deg,#424242,#616161);display:flex;align-items:center;justify-content:center;font-size:24px">⬜</div>
+            <div style="width:44px;height:44px;border-radius:50%;background:linear-gradient(135deg,#00E676,#0B8A5E);display:flex;align-items:center;justify-content:center;font-size:22px">💼</div>
             <div>
-              <div style="font-weight:700;font-size:16px;color:#fff">${t('deposit.external_wallet')}</div>
-              <div style="font-size:13px;color:#848E9C;margin-top:2px">${t('deposit.external_wallet_desc')}</div>
+              <div style="font-weight:600;font-size:16px;color:#fff">${t('deposit.method_external_wallet')}</div>
+              <div style="font-size:12px;color:#7B8CA2">${t('deposit.method_crypto')}</div>
             </div>
           </div>
-          <div style="color:#848E9C;font-size:20px">›</div>
+          <span style="color:#7B8CA2;font-size:18px">›</span>
         </div>
       </div>
     </div>`;
-    
-    document.getElementById('backAssets').onclick = renderAssets;
-    document.getElementById('cryptoBotCard').onclick = showCurrencySelection;
-    document.getElementById('externalWalletCard').onclick = showExternalWalletPlaceholder;
-    
-    // Add hover effects
-    document.querySelectorAll('.deposit-method-card').forEach(card => {
-      card.onmouseenter = () => { card.style.borderColor = '#F0B90B'; card.style.background = '#252525'; };
-      card.onmouseleave = () => { card.style.borderColor = 'transparent'; card.style.background = '#1E2329'; };
+
+    document.getElementById('backDeposit').onclick = renderAssets;
+
+    const xr = document.getElementById('methodXRocket');
+    const ox = document.getElementById('methodOxaPay');
+    [xr, ox].forEach(el => {
+      el.onmouseenter = () => { el.style.borderColor = '#E040FB'; el.style.background = '#252525'; };
+      el.onmouseleave = () => { el.style.borderColor = 'transparent'; el.style.background = '#131A2A'; };
     });
+    xr.onclick = () => showXRocketCurrencySelection();
+    ox.onclick = () => showOxaPayCoinSelection();
   }
-  
-  // Step 2a: Crypto Bot - Currency selection
-  async function showCurrencySelection() {
-    const cryptoList = ['BTC', 'ETH', 'USDT', 'USDC', 'BNB', 'SOL', 'TON', 'TRX', 'LTC', 'DOGE'];
-    let cryptoExpanded = false;
-    
-    const prefFiat = userData.preferred_fiat || 'RUB';
-    const fiatSymbol = CURRENCY_SYMBOLS[prefFiat] || '₽';
-    const fiatName = CURRENCY_NAMES[prefFiat]?.[i18n.lang] || prefFiat;
-    const fiatColors = { 'RUB': '#1E88E5', 'BYN': '#43A047', 'UAH': '#FFC107' };
-    const fiatColor = fiatColors[prefFiat] || '#1E88E5';
-    const fiatTextColor = prefFiat === 'UAH' ? '#000' : '#fff';
-    
+
+  function showXRocketCurrencySelection() {
+    const titleText = t('deposit.select_currency');
     cont.innerHTML = `
     <div class="container" style="padding:16px">
-      <button class="btn" id="backMethod" style="background:transparent;border:none;color:#fff;font-size:16px;padding:8px 0;margin-bottom:16px">← ${t('btn.back')}</button>
-      <div class="section-title" style="font-size:20px;font-weight:700;margin-bottom:20px">${t('deposit.select_currency')}</div>
-      
-      <div id="currencyList" style="display:flex;flex-direction:column;gap:8px">
-        <!-- User's preferred fiat Option -->
-        <div class="currency-card" data-currency="${prefFiat}" style="background:#1E2329;border-radius:6px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;border:1px solid transparent;transition:all 0.2s">
-          <div style="display:flex;align-items:center;gap:12px">
-            <div style="width:40px;height:40px;border-radius:50%;background:${fiatColor};display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:${fiatTextColor}">${fiatSymbol}</div>
-            <div>
-              <div style="font-weight:600;font-size:15px;color:#fff">${prefFiat}</div>
-              <div style="font-size:12px;color:#848E9C">${fiatName}</div>
-            </div>
-          </div>
-          <div style="color:#848E9C;font-size:18px">›</div>
-        </div>
-        
-        <!-- Crypto Toggle -->
-        <div id="cryptoToggle" style="background:#1E2329;border-radius:6px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;border:1px solid transparent;transition:all 0.2s">
-          <div style="display:flex;align-items:center;gap:12px">
-            <div style="width:40px;height:40px;border-radius:50%;background:#F0B90B;display:flex;align-items:center;justify-content:center;font-size:18px">💰</div>
-            <div>
-              <div style="font-weight:600;font-size:15px;color:#fff">${t('deposit.crypto_currencies')}</div>
-              <div style="font-size:12px;color:#848E9C">${cryptoList.length} ${i18n.lang === 'ru' ? 'валют' : 'currencies'}</div>
-            </div>
-          </div>
-          <div id="cryptoArrow" style="color:#848E9C;font-size:18px;transition:transform 0.3s">▼</div>
-        </div>
-        
-        <!-- Crypto List (hidden by default) -->
-        <div id="cryptoListContainer" style="display:none;flex-direction:column;gap:8px;margin-left:20px;animation:fadeIn 0.3s ease">
-        </div>
+      <button class="btn" id="backXR" style="background:transparent;border:none;color:#fff;font-size:16px;padding:8px 0;margin-bottom:16px">← ${t('btn.back')}</button>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px">
+        <div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#6C5CE7,#A29BFE);display:flex;align-items:center;justify-content:center;font-size:16px">🚀</div>
+        <div class="section-title" style="font-size:20px;font-weight:700;margin:0">${titleText}</div>
       </div>
-    </div>
-    <style>
-      @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
-    </style>`;
-    
-    document.getElementById('backMethod').onclick = showDepositMethodSelection;
-    
-    // Fiat currency click handler
-    document.querySelector(`[data-currency="${prefFiat}"]`).onclick = () => showFiatAmountInput(prefFiat);
-    
-    // Crypto toggle
-    document.getElementById('cryptoToggle').onclick = () => {
-      cryptoExpanded = !cryptoExpanded;
-      const container = document.getElementById('cryptoListContainer');
-      const arrow = document.getElementById('cryptoArrow');
-      
-      if (cryptoExpanded) {
-        container.style.display = 'flex';
-        arrow.style.transform = 'rotate(180deg)';
-        
-        // Populate crypto list
-        container.innerHTML = cryptoList.map(sym => {
+      <div id="xrCoinList" style="display:flex;flex-direction:column;gap:8px">
+        ${xRocketCurrencies.map(sym => {
           const logo = cryptoLogos[sym] || '';
-          const logoHTML = logo ? `<img src="${logo}" style="width:36px;height:36px;border-radius:50%" onerror="this.innerHTML='💰'"/>` : `<div style="width:36px;height:36px;border-radius:50%;background:#333;display:flex;align-items:center;justify-content:center">💰</div>`;
-          return `
-            <div class="currency-card" data-currency="${sym}" style="background:#1A1A1A;border-radius:10px;padding:12px 14px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;border:1px solid transparent;transition:all 0.2s">
-              <div style="display:flex;align-items:center;gap:10px">
-                ${logoHTML}
-                <div style="font-weight:600;font-size:14px;color:#fff">${sym}</div>
-              </div>
-              <div style="color:#848E9C;font-size:16px">›</div>
+          const logoHTML = logo ? `<img src="${logo}" style="width:40px;height:40px;border-radius:50%" onerror="this.style.display='none'"/>` : `<div style="width:40px;height:40px;border-radius:50%;background:#333;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#E040FB">${sym[0]}</div>`;
+          return `<div class="xr-coin-card" data-sym="${sym}" style="background:#131A2A;border-radius:6px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;border:1px solid transparent;transition:all 0.2s">
+            <div style="display:flex;align-items:center;gap:12px">
+              ${logoHTML}
+              <div style="font-weight:600;font-size:15px;color:#fff">${sym}</div>
             </div>
-          `;
-        }).join('');
-        
-        // Add click handlers for crypto cards
-        container.querySelectorAll('.currency-card').forEach(card => {
-          card.onclick = () => showCryptoAmountInput(card.dataset.currency);
-          card.onmouseenter = () => { card.style.borderColor = '#F0B90B'; card.style.background = '#252525'; };
-          card.onmouseleave = () => { card.style.borderColor = 'transparent'; card.style.background = '#1A1A1A'; };
-        });
-      } else {
-        container.style.display = 'none';
-        arrow.style.transform = 'rotate(0deg)';
-      }
-    };
-    
-    // Add hover effects
-    document.querySelectorAll('.currency-card, #cryptoToggle').forEach(card => {
-      card.onmouseenter = () => { card.style.borderColor = '#F0B90B'; card.style.background = '#252525'; };
-      card.onmouseleave = () => { card.style.borderColor = 'transparent'; card.style.background = '#1E2329'; };
+            <span style="color:#7B8CA2;font-size:18px">›</span>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+
+    document.getElementById('backXR').onclick = showDepositMethodSelection;
+
+    document.querySelectorAll('.xr-coin-card').forEach(card => {
+      card.onclick = () => showXRocketAmountInput(card.dataset.sym);
+      card.onmouseenter = () => { card.style.borderColor = '#E040FB'; card.style.background = '#252525'; };
+      card.onmouseleave = () => { card.style.borderColor = 'transparent'; card.style.background = '#131A2A'; };
     });
   }
-  
-  // Fiat amount input (works with RUB, BYN, UAH)
-  async function showFiatAmountInput(fiatCurrency) {
-    await updateRates();
-    
-    const fiatSymbol = CURRENCY_SYMBOLS[fiatCurrency] || '₽';
-    const fiatRate = getRateForCurrency(fiatCurrency);
-    const fiatColors = { 'RUB': '#1E88E5', 'BYN': '#43A047', 'UAH': '#FFC107' };
-    const fiatColor = fiatColors[fiatCurrency] || '#1E88E5';
-    const fiatTextColor = fiatCurrency === 'UAH' ? '#000' : '#fff';
-    
-    const minFiat = isAdmin ? 0 : Math.ceil(getMinDepositInFiat(fiatCurrency));
-    
-    let quickAmounts;
-    if (fiatCurrency === 'RUB') {
-      quickAmounts = [5000, 10000, 15000, 20000];
-    } else if (fiatCurrency === 'UAH') {
-      quickAmounts = [2000, 4000, 6000, 8000];
-    } else { // BYN
-      quickAmounts = [150, 300, 500, 700];
-    }
-    
+
+  function showXRocketAmountInput(currency) {
+    const minAmount = 1;
+    const presets = [5, 10, 25, 50, 100, 250];
+    const orText = t('deposit.or_custom');
+    const logo = cryptoLogos[currency] || '';
+
     cont.innerHTML = `
     <div class="container" style="padding:16px">
-      <button class="btn" id="backCurrency" style="background:transparent;border:none;color:#fff;font-size:16px;padding:8px 0;margin-bottom:16px">← ${t('btn.back')}</button>
-      <div class="section-title" style="font-size:20px;font-weight:700;margin-bottom:8px">${t('deposit.enter_amount')}</div>
-      <div style="color:#848E9C;font-size:13px;margin-bottom:20px">${t('deposit.current_rate')}: 1$ = ${fiatRate.toFixed(2)} ${fiatSymbol}</div>
-      
-      <div style="background:#1E2329;border-radius:6px;padding:20px;margin-bottom:16px">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
-          <div style="width:44px;height:44px;border-radius:50%;background:${fiatColor};display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:${fiatTextColor}">${fiatSymbol}</div>
-          <input id="fiatAmount" type="number" inputmode="numeric" class="input" placeholder="${minFiat}" style="flex:1;font-size:24px;font-weight:700;background:transparent;border:none;color:#fff;text-align:right" value=""/>
+      <button class="btn" id="backXRCur" style="background:transparent;border:none;color:#fff;font-size:16px;padding:8px 0;margin-bottom:16px">← ${t('btn.back')}</button>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
+        ${logo ? `<img src="${logo}" style="width:32px;height:32px;border-radius:50%"/>` : ''}
+        <div class="section-title" style="font-size:20px;font-weight:700;margin:0">${currency}</div>
+        <span style="font-size:11px;color:#A29BFE;background:rgba(108,92,231,0.2);padding:4px 10px;border-radius:12px">xRocket</span>
+      </div>
+      <div style="color:#7B8CA2;font-size:13px;margin-bottom:20px">${t('deposit.enter_amount_in') + ' ' + currency}</div>
+
+      <div style="background:#131A2A;border-radius:6px;padding:20px;margin-bottom:16px">
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px">
+          ${presets.map(amt => `<button class="xr-preset-btn" data-amount="${amt}" style="padding:12px 0;background:#2A2A2A;border:1px solid #3A3A3A;border-radius:8px;color:#fff;font-size:16px;font-weight:700;cursor:pointer;transition:all 0.2s">${amt}</button>`).join('')}
         </div>
-        
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
-          ${quickAmounts.map(amt => `<button class="quick-amount-btn" data-amount="${amt}" style="padding:10px 16px;background:#2A2A2A;border:1px solid #3A3A3A;border-radius:8px;color:#fff;font-size:14px;font-weight:600;cursor:pointer;transition:all 0.2s">${amt.toLocaleString()} ${fiatSymbol}</button>`).join('')}
+        <div style="text-align:center;color:#555;font-size:12px;margin-bottom:12px">— ${orText} —</div>
+        <div style="display:flex;align-items:center;gap:12px">
+          <input id="xrCustomAmount" type="number" inputmode="decimal" class="input" placeholder="${minAmount}" step="0.01" style="flex:1;font-size:24px;font-weight:700;background:transparent;border:none;color:#fff;text-align:right" value=""/>
+          <span style="color:#7B8CA2;font-size:18px;font-weight:600">${currency}</span>
         </div>
-        
-        <div style="border-top:1px solid #333;padding-top:16px">
-          <div style="display:flex;justify-content:space-between;align-items:center">
-            <span style="color:#848E9C;font-size:14px">${t('deposit.you_will_receive')}:</span>
-            <span id="usdtResult" style="color:#0ECB81;font-size:18px;font-weight:700">0$</span>
-          </div>
+        <div style="border-top:1px solid #333;padding-top:12px;margin-top:12px;display:flex;justify-content:space-between">
+          <span style="color:#7B8CA2;font-size:12px">${t('deposit.fee_zero')}</span>
+          <span style="color:#7B8CA2;font-size:12px">${t('deposit.min_short')}: ${minAmount} ${currency}</span>
         </div>
       </div>
-      
-      <div style="color:#848E9C;font-size:12px;margin-bottom:16px;text-align:center">${t('deposit.min_amount')}: ${minFiat.toLocaleString()} ${fiatSymbol} (~50$)</div>
-      
-      <button class="btn btn-primary fullwidth" id="fiatSubmit" style="padding:16px;font-size:16px;font-weight:600;background:#F0B90B;border-radius:6px">${t('deposit.continue')}</button>
+      <button class="btn btn-primary fullwidth" id="xrSubmit" style="padding:16px;font-size:16px;font-weight:600;background:#E040FB;border-radius:6px">${t('deposit.continue')}</button>
     </div>`;
-    
-    document.getElementById('backCurrency').onclick = showCurrencySelection;
-    
-    const fiatAmountEl = document.getElementById('fiatAmount');
-    const usdtResultEl = document.getElementById('usdtResult');
-    
-    // Calculate USD on input
-    function updateUsdt() {
-      const fiat = Number(fiatAmountEl.value || 0);
-      const usd = convertFiatToUsd(fiat, fiatCurrency);
-      usdtResultEl.textContent = usd > 0 ? `~${usd.toFixed(2)}$` : '0$';
-    }
-    
-    fiatAmountEl.oninput = updateUsdt;
-    
-    // Quick amount buttons
-    document.querySelectorAll('.quick-amount-btn').forEach(btn => {
+
+    document.getElementById('backXRCur').onclick = () => showXRocketCurrencySelection();
+
+    const customInput = document.getElementById('xrCustomAmount');
+
+    document.querySelectorAll('.xr-preset-btn').forEach(btn => {
       btn.onclick = () => {
-        fiatAmountEl.value = btn.dataset.amount;
-        updateUsdt();
-        document.querySelectorAll('.quick-amount-btn').forEach(b => { b.style.borderColor = '#3A3A3A'; b.style.background = '#2A2A2A'; });
-        btn.style.borderColor = '#F0B90B';
-        btn.style.background = 'rgba(98,77,228,0.2)';
+        customInput.value = btn.dataset.amount;
+        document.querySelectorAll('.xr-preset-btn').forEach(b => { b.style.borderColor = '#3A3A3A'; b.style.background = '#2A2A2A'; });
+        btn.style.borderColor = '#E040FB'; btn.style.background = 'rgba(224,64,251,0.12)';
       };
-      btn.onmouseenter = () => { if(btn.style.borderColor !== 'rgb(98, 77, 228)') btn.style.background = '#333'; };
-      btn.onmouseleave = () => { if(btn.style.borderColor !== 'rgb(98, 77, 228)') btn.style.background = '#2A2A2A'; };
+      btn.onmouseenter = () => { if (btn.style.borderColor !== 'rgb(224, 64, 251)') btn.style.background = '#333'; };
+      btn.onmouseleave = () => { if (btn.style.borderColor !== 'rgb(224, 64, 251)') btn.style.background = '#2A2A2A'; };
     });
-    
-    // Submit
-    document.getElementById('fiatSubmit').onclick = async () => {
-      const fiat = Number(fiatAmountEl.value || 0);
-      const usd = convertFiatToUsd(fiat, fiatCurrency);
-      
-      if (!fiat || fiat < minFiat) {
-        toast(`${t('deposit.min_amount')}: ${minFiat.toLocaleString()} ${fiatSymbol}`);
-        return;
-      }
-      
-      await createInvoice(usd, 'USDT');
+
+    customInput.oninput = () => {
+      const val = Number(customInput.value || 0);
+      document.querySelectorAll('.xr-preset-btn').forEach(b => {
+        if (Number(b.dataset.amount) === val) { b.style.borderColor = '#E040FB'; b.style.background = 'rgba(224,64,251,0.12)'; }
+        else { b.style.borderColor = '#3A3A3A'; b.style.background = '#2A2A2A'; }
+      });
+    };
+
+    document.getElementById('xrSubmit').onclick = async () => {
+      const amount = Number(customInput.value || 0);
+      if (!amount || amount < minAmount) { toast(`${t('deposit.min_amount_toast')}: ${minAmount} ${currency}`); return; }
+      await createXRocketInvoice(amount, currency);
     };
   }
-  
-  // Crypto amount input
-  async function showCryptoAmountInput(currency) {
-    const minAmount = isAdmin ? 0 : (currency === 'USDT' ? 50 : 0.001);
-    
-    cont.innerHTML = `
-    <div class="container" style="padding:16px">
-      <button class="btn" id="backCurrency" style="background:transparent;border:none;color:#fff;font-size:16px;padding:8px 0;margin-bottom:16px">← ${t('btn.back')}</button>
-      <div class="section-title" style="font-size:20px;font-weight:700;margin-bottom:20px">${t('deposit.enter_amount')} (${currency})</div>
-      
-      <div style="background:#1E2329;border-radius:6px;padding:20px;margin-bottom:16px">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
-          <img src="${cryptoLogos[currency] || ''}" style="width:44px;height:44px;border-radius:50%" onerror="this.style.display='none'"/>
-          <input id="cryptoAmount" type="number" inputmode="decimal" class="input" placeholder="${minAmount}" step="0.00001" style="flex:1;font-size:24px;font-weight:700;background:transparent;border:none;color:#fff;text-align:right" value=""/>
-          <span style="color:#848E9C;font-size:18px;font-weight:600">${currency}</span>
-        </div>
-      </div>
-      
-      <div style="color:#848E9C;font-size:12px;margin-bottom:16px;text-align:center">${t('deposit.min_amount')}: ${minAmount} ${currency}</div>
-      
-      <button class="btn btn-primary fullwidth" id="cryptoSubmit" style="padding:16px;font-size:16px;font-weight:600;background:#F0B90B;border-radius:6px">${t('deposit.continue')}</button>
-    </div>`;
-    
-    document.getElementById('backCurrency').onclick = showCurrencySelection;
-    
-    // Submit
-    document.getElementById('cryptoSubmit').onclick = async () => {
-      const amount = Number(document.getElementById('cryptoAmount').value || 0);
-      
-      if (!amount || amount < minAmount) {
-        toast(`${t('deposit.min_amount')}: ${minAmount} ${currency}`);
-        return;
-      }
-      
-      await createInvoice(amount, currency);
-    };
-  }
-  
-  // Create invoice and redirect
-  async function createInvoice(amount, currency) {
+
+  async function createXRocketInvoice(amount, currency) {
     toast(t('deposit.creating_invoice'));
-    
     try {
-      const res = await apiFetch('/api/deposit/create_invoice', {
+      const res = await apiFetch('/api/deposit/xrocket/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount: amount, currency: currency })
+        body: JSON.stringify({ amount, currency })
       });
       const data = await res.json();
-      
+
       if (data.ok) {
-        const invoiceId = data.invoice_id;
-        const payUrl = data.pay_url;
-        
-        if (payUrl) {
-          if (tg && tg.openLink) {
-            tg.openLink(payUrl);
-          } else if (tg && tg.openTelegramLink) {
-            tg.openTelegramLink(payUrl);
-          } else {
-            window.open(payUrl, '_blank');
-          }
-        }
-        
-        // Show polling status page
-        showDepositPolling(invoiceId, amount, currency);
+        showXRocketPaymentScreen(data);
       } else {
         toast(data.error || t('toast.error'));
       }
     } catch (e) {
-      console.error('deposit error', e);
+      console.error('xRocket error', e);
       toast(t('toast.error'));
     }
   }
-  
-  // Deposit polling status page
-  function showDepositPolling(invoiceId, amount, currency) {
-    const waitingText = i18n.lang === 'ru' ? 'Ожидание оплаты...' : 'Waiting for payment...';
-    const amountText = i18n.lang === 'ru' ? 'Сумма' : 'Amount';
-    const statusText = i18n.lang === 'ru' ? 'Статус' : 'Status';
-    const checkingText = i18n.lang === 'ru' ? 'Проверяем оплату...' : 'Checking payment...';
-    const paidText = i18n.lang === 'ru' ? 'Оплачено!' : 'Paid!';
-    const creditedText = i18n.lang === 'ru' ? 'Зачислено на баланс' : 'Credited to balance';
-    const cancelText = i18n.lang === 'ru' ? 'Отмена' : 'Cancel';
-    const openPaymentText = i18n.lang === 'ru' ? 'Открыть оплату' : 'Open payment';
-    
+
+  function showXRocketPaymentScreen(payData) {
+    const { invoice_id, bot_link, amount, currency, fee } = payData;
+    const waitText = t('deposit.waiting');
+    const descText = t('deposit.pay_via_xrocket');
+    const amountLabel = t('history.amount');
+    const methodLabel = t('history.method');
+    const paidText = t('deposit.status_paid');
+    const cancelText = t('btn.cancel');
+    const payBtnText = t('deposit.pay_xrocket');
+
     cont.innerHTML = `
     <div class="container" style="padding:16px">
-      <div style="text-align:center;padding:40px 20px">
-        <div id="depositSpinner" style="margin-bottom:24px">
-          <div style="width:80px;height:80px;margin:0 auto;border:3px solid #2B3139;border-top-color:#F0B90B;border-radius:50%;animation:spin 1s linear infinite"></div>
+      <div style="text-align:center;padding:24px 0">
+        <div id="xrPaySpinner" style="margin-bottom:16px">
+          <div style="width:60px;height:60px;margin:0 auto;border:3px solid rgba(255,255,255,0.08);border-top-color:#A29BFE;border-radius:50%;animation:spin 1s linear infinite"></div>
         </div>
-        <div id="depositIcon" style="display:none;font-size:64px;margin-bottom:24px">✅</div>
-        
-        <h2 id="depositTitle" style="color:#EAECEF;margin-bottom:12px;font-size:20px">${waitingText}</h2>
-        <p id="depositStatus" style="color:#848E9C;font-size:14px;margin-bottom:24px">${checkingText}</p>
-        
-        <div style="background:#1E2329;border-radius:12px;padding:16px;margin-bottom:24px">
-          <div style="display:flex;justify-content:space-between;margin-bottom:8px">
-            <span style="color:#848E9C">${amountText}</span>
-            <span style="color:#EAECEF;font-weight:600">${amount} ${currency}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between">
-            <span style="color:#848E9C">${statusText}</span>
-            <span id="paymentStatus" style="color:#F0B90B;font-weight:600">${checkingText}</span>
-          </div>
+        <div id="xrPayIcon" style="display:none;font-size:56px;margin-bottom:16px">✅</div>
+        <h2 id="xrPayTitle" style="color:#EAECEF;margin-bottom:6px;font-size:18px">${waitText}</h2>
+        <p style="color:#7B8CA2;font-size:13px;margin-bottom:4px">${descText}</p>
+      </div>
+
+      <div style="background:#131A2A;border-radius:8px;padding:16px;margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:12px">
+          <span style="color:#7B8CA2;font-size:13px">${amountLabel}</span>
+          <span style="color:#00E676;font-size:16px;font-weight:700">${amount} ${currency}</span>
         </div>
-        
-        <div style="display:flex;gap:12px">
-          <button class="btn" id="cancelDeposit" style="flex:1;background:#2B3139;padding:14px">${cancelText}</button>
-          <button class="btn btn-primary" id="openPayment" style="flex:1;padding:14px">${openPaymentText}</button>
+        <div style="display:flex;justify-content:space-between">
+          <span style="color:#7B8CA2;font-size:13px">${methodLabel}</span>
+          <span style="color:#A29BFE;font-size:14px;font-weight:600">🚀 xRocket</span>
         </div>
       </div>
+
+      <a href="${bot_link}" target="_blank" style="display:block;text-decoration:none;margin-bottom:12px">
+        <button class="btn btn-primary fullwidth" style="padding:16px;font-size:16px;font-weight:600;background:linear-gradient(135deg,#6C5CE7,#A29BFE);border-radius:6px;width:100%;border:none;color:#fff;cursor:pointer">🚀 ${payBtnText}</button>
+      </a>
+
+      <div id="xrStatusBar" style="background:#131A2A;border-radius:8px;padding:12px 16px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center">
+        <span style="color:#7B8CA2;font-size:13px">${t('profile.status')}</span>
+        <span id="xrPayStatus" style="color:#E040FB;font-weight:600;font-size:13px">${t('deposit.status_waiting')}</span>
+      </div>
+
+      <button class="btn" id="xrCancelPay" style="width:100%;background:rgba(255,255,255,0.08);padding:14px;font-size:14px">${cancelText}</button>
     </div>
-    <style>
-      @keyframes spin { to { transform: rotate(360deg); } }
-    </style>
-    `;
-    
-    document.getElementById('cancelDeposit').onclick = () => {
-      clearInterval(pollInterval);
-      renderAssets();
-    };
-    
-    document.getElementById('openPayment').onclick = () => {
-      if (tg && tg.openLink) {
-        tg.openLink(`https://t.me/CryptoBot?start=IV${invoiceId}`);
-      } else {
-        window.open(`https://t.me/CryptoBot?start=IV${invoiceId}`, '_blank');
-      }
-    };
-    
-    // Poll every 5 seconds
-    let pollCount = 0;
-    const maxPolls = 120; // 10 minutes max
-    
-    const pollInterval = setInterval(async () => {
-      pollCount++;
-      if (pollCount > maxPolls) {
-        clearInterval(pollInterval);
-        document.getElementById('depositStatus').textContent = i18n.lang === 'ru' ? 'Время ожидания истекло' : 'Timeout';
-        return;
-      }
-      
+    <style>@keyframes spin { to { transform: rotate(360deg); } }</style>`;
+
+    document.getElementById('xrCancelPay').onclick = () => { clearInterval(xrPollInterval); renderAssets(); };
+
+    let xrPollCount = 0;
+    const xrPollInterval = setInterval(async () => {
+      xrPollCount++;
+      if (xrPollCount > 720) { clearInterval(xrPollInterval); return; }
       try {
-        const res = await apiFetch(`/api/check_deposit?invoice_id=${invoiceId}`);
+        const res = await apiFetch(`/api/deposit/xrocket/check?invoice_id=${invoice_id}`);
         const data = await res.json();
-        
         if (data.paid) {
-          clearInterval(pollInterval);
-          
-          // Show success
-          document.getElementById('depositSpinner').style.display = 'none';
-          document.getElementById('depositIcon').style.display = 'block';
-          document.getElementById('depositTitle').textContent = paidText;
-          document.getElementById('depositTitle').style.color = '#0ECB81';
-          document.getElementById('depositStatus').textContent = creditedText;
-          document.getElementById('paymentStatus').textContent = paidText;
-          document.getElementById('paymentStatus').style.color = '#0ECB81';
-          
-          toast(i18n.lang === 'ru' ? '✅ Депозит успешно зачислен!' : '✅ Deposit credited!');
-          
-          // Redirect to assets after 2 seconds
-          setTimeout(() => {
-            renderAssets();
-          }, 2000);
+          clearInterval(xrPollInterval);
+          document.getElementById('xrPaySpinner').style.display = 'none';
+          document.getElementById('xrPayIcon').style.display = 'block';
+          document.getElementById('xrPayTitle').textContent = paidText;
+          document.getElementById('xrPayTitle').style.color = '#00E676';
+          document.getElementById('xrPayStatus').textContent = paidText;
+          document.getElementById('xrPayStatus').style.color = '#00E676';
+          toast(t('deposit.credited_toast'));
+          setTimeout(() => renderAssets(), 2500);
+        } else if (data.status) {
+          const sMap = { 'active': t('deposit.status_waiting'), 'expired': t('deposit.status_expired') };
+          document.getElementById('xrPayStatus').textContent = sMap[data.status] || data.status;
         }
-      } catch (e) {
-        console.error('Poll error', e);
-      }
+      } catch(e) { console.error('xRocket poll error', e); }
     }, 5000);
-    
-    // Initial check
-    setTimeout(async () => {
-      try {
-        const res = await apiFetch(`/api/check_deposit?invoice_id=${invoiceId}`);
-        const data = await res.json();
-        if (data.paid) {
-          clearInterval(pollInterval);
-          document.getElementById('depositSpinner').style.display = 'none';
-          document.getElementById('depositIcon').style.display = 'block';
-          document.getElementById('depositTitle').textContent = paidText;
-          document.getElementById('depositTitle').style.color = '#0ECB81';
-          document.getElementById('depositStatus').textContent = creditedText;
-          document.getElementById('paymentStatus').textContent = paidText;
-          document.getElementById('paymentStatus').style.color = '#0ECB81';
-          toast(i18n.lang === 'ru' ? '✅ Депозит успешно зачислен!' : '✅ Deposit credited!');
-          setTimeout(() => renderAssets(), 2000);
-        }
-      } catch (e) {}
-    }, 1000);
   }
-  
-  // Step 2b: External wallet placeholder
-  function showExternalWalletPlaceholder() {
+
+  function showOxaPayCoinSelection() {
+    const titleText = t('deposit.select_coin');
+
     cont.innerHTML = `
     <div class="container" style="padding:16px">
       <button class="btn" id="backMethod" style="background:transparent;border:none;color:#fff;font-size:16px;padding:8px 0;margin-bottom:16px">← ${t('btn.back')}</button>
-      
-      <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:300px;text-align:center">
-        <div style="width:80px;height:80px;border-radius:50%;background:linear-gradient(135deg,#424242,#616161);display:flex;align-items:center;justify-content:center;font-size:36px;margin-bottom:20px">🔒</div>
-        <div style="font-size:20px;font-weight:700;color:#fff;margin-bottom:8px">${t('deposit.coming_soon')}</div>
-        <div style="font-size:14px;color:#848E9C;max-width:280px">${t('deposit.coming_soon_desc')}</div>
+      <div class="section-title" style="font-size:20px;font-weight:700;margin-bottom:20px">${titleText}</div>
+      <div id="oxaCoinList" style="display:flex;flex-direction:column;gap:8px">
+        ${oxaCoins.map(c => {
+          const logo = cryptoLogos[c.sym] || '';
+          const logoHTML = logo ? `<img src="${logo}" style="width:40px;height:40px;border-radius:50%" onerror="this.style.display='none'"/>` : `<div style="width:40px;height:40px;border-radius:50%;background:#333;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#E040FB">${c.sym[0]}</div>`;
+          return `<div class="oxa-coin-card" data-sym="${c.sym}" style="background:#131A2A;border-radius:6px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;border:1px solid transparent;transition:all 0.2s">
+            <div style="display:flex;align-items:center;gap:12px">
+              ${logoHTML}
+              <div>
+                <div style="font-weight:600;font-size:15px;color:#fff">${c.sym}</div>
+                <div style="font-size:12px;color:#7B8CA2">${c.name}</div>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:11px;color:#555">${c.networks.length > 1 ? c.networks.length + (' ' + t('deposit.networks_count')) : c.networks[0].name}</span>
+              <span style="color:#7B8CA2;font-size:18px">›</span>
+            </div>
+          </div>`;
+        }).join('')}
       </div>
     </div>`;
-    
+
     document.getElementById('backMethod').onclick = showDepositMethodSelection;
+
+    document.querySelectorAll('.oxa-coin-card').forEach(card => {
+      const sym = card.dataset.sym;
+      const coin = oxaCoins.find(c => c.sym === sym);
+      card.onclick = () => {
+        if (coin.networks.length === 1) {
+          showOxaPayAmountInput(coin, coin.networks[0]);
+        } else {
+          showOxaPayNetworkSelection(coin);
+        }
+      };
+      card.onmouseenter = () => { card.style.borderColor = '#E040FB'; card.style.background = '#252525'; };
+      card.onmouseleave = () => { card.style.borderColor = 'transparent'; card.style.background = '#131A2A'; };
+    });
   }
+
+  function showOxaPayNetworkSelection(coin) {
+    const titleText = t('deposit.select_network');
+    const logo = cryptoLogos[coin.sym] || '';
+
+    cont.innerHTML = `
+    <div class="container" style="padding:16px">
+      <button class="btn" id="backCoins" style="background:transparent;border:none;color:#fff;font-size:16px;padding:8px 0;margin-bottom:16px">← ${t('btn.back')}</button>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
+        ${logo ? `<img src="${logo}" style="width:36px;height:36px;border-radius:50%"/>` : ''}
+        <div class="section-title" style="font-size:20px;font-weight:700;margin:0">${coin.sym} — ${titleText}</div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        ${coin.networks.map(net => `<div class="oxa-net-card" data-net="${net.id}" style="background:#131A2A;border-radius:6px;padding:16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;border:1px solid transparent;transition:all 0.2s">
+          <div style="display:flex;align-items:center;gap:12px">
+            <div style="width:36px;height:36px;border-radius:50%;background:#2A2A2A;display:flex;align-items:center;justify-content:center;font-size:14px;color:#E040FB;font-weight:700">⛓</div>
+            <div style="font-weight:600;font-size:15px;color:#fff">${net.name}</div>
+          </div>
+          <div style="color:#7B8CA2;font-size:18px">›</div>
+        </div>`).join('')}
+      </div>
+    </div>`;
+
+    document.getElementById('backCoins').onclick = showOxaPayCoinSelection;
+
+    document.querySelectorAll('.oxa-net-card').forEach(card => {
+      const net = coin.networks.find(n => n.id === card.dataset.net);
+      card.onclick = () => showOxaPayAmountInput(coin, net);
+      card.onmouseenter = () => { card.style.borderColor = '#E040FB'; card.style.background = '#252525'; };
+      card.onmouseleave = () => { card.style.borderColor = 'transparent'; card.style.background = '#131A2A'; };
+    });
+  }
+
+  function showOxaPayAmountInput(coin, network) {
+    const minAmount = 5;
+    const presets = [10, 25, 50, 100, 250, 500];
+    const orText = t('deposit.or_custom');
+    const logo = cryptoLogos[coin.sym] || '';
+
+    cont.innerHTML = `
+    <div class="container" style="padding:16px">
+      <button class="btn" id="backNet" style="background:transparent;border:none;color:#fff;font-size:16px;padding:8px 0;margin-bottom:16px">← ${t('btn.back')}</button>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
+        ${logo ? `<img src="${logo}" style="width:32px;height:32px;border-radius:50%"/>` : ''}
+        <div class="section-title" style="font-size:20px;font-weight:700;margin:0">${coin.sym}</div>
+        <span style="font-size:13px;color:#7B8CA2;background:#2A2A2A;padding:4px 10px;border-radius:12px">${network.name}</span>
+      </div>
+      <div style="color:#7B8CA2;font-size:13px;margin-bottom:20px">${t('deposit.enter_amount_usd')}</div>
+
+      <div style="background:#131A2A;border-radius:6px;padding:20px;margin-bottom:16px">
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px">
+          ${presets.map(amt => `<button class="oxapay-preset-btn" data-amount="${amt}" style="padding:12px 0;background:#2A2A2A;border:1px solid #3A3A3A;border-radius:8px;color:#fff;font-size:16px;font-weight:700;cursor:pointer;transition:all 0.2s">${amt}$</button>`).join('')}
+        </div>
+        <div style="text-align:center;color:#555;font-size:12px;margin-bottom:12px">— ${orText} —</div>
+        <div style="display:flex;align-items:center;gap:12px">
+          <input id="oxaCustomAmount" type="number" inputmode="decimal" class="input" placeholder="${minAmount}" step="1" style="flex:1;font-size:24px;font-weight:700;background:transparent;border:none;color:#fff;text-align:right" value=""/>
+          <span style="color:#7B8CA2;font-size:18px;font-weight:600">USD</span>
+        </div>
+        <div style="border-top:1px solid #333;padding-top:12px;margin-top:12px;display:flex;justify-content:space-between">
+          <span style="color:#7B8CA2;font-size:12px">${t('deposit.fee_zero')}</span>
+          <span style="color:#7B8CA2;font-size:12px">${t('deposit.min_short')}: ${minAmount}$</span>
+        </div>
+      </div>
+      <button class="btn btn-primary fullwidth" id="oxaSubmit" style="padding:16px;font-size:16px;font-weight:600;background:#E040FB;border-radius:6px">${t('deposit.continue')}</button>
+    </div>`;
+
+    document.getElementById('backNet').onclick = () => {
+      if (coin.networks.length === 1) showOxaPayCoinSelection();
+      else showOxaPayNetworkSelection(coin);
+    };
+
+    const customInput = document.getElementById('oxaCustomAmount');
+
+    document.querySelectorAll('.oxapay-preset-btn').forEach(btn => {
+      btn.onclick = () => {
+        customInput.value = btn.dataset.amount;
+        document.querySelectorAll('.oxapay-preset-btn').forEach(b => { b.style.borderColor = '#3A3A3A'; b.style.background = '#2A2A2A'; });
+        btn.style.borderColor = '#E040FB'; btn.style.background = 'rgba(224,64,251,0.12)';
+      };
+      btn.onmouseenter = () => { if (btn.style.borderColor !== 'rgb(224, 64, 251)') btn.style.background = '#333'; };
+      btn.onmouseleave = () => { if (btn.style.borderColor !== 'rgb(224, 64, 251)') btn.style.background = '#2A2A2A'; };
+    });
+
+    customInput.oninput = () => {
+      const val = Number(customInput.value || 0);
+      document.querySelectorAll('.oxapay-preset-btn').forEach(b => {
+        if (Number(b.dataset.amount) === val) { b.style.borderColor = '#E040FB'; b.style.background = 'rgba(224,64,251,0.12)'; }
+        else { b.style.borderColor = '#3A3A3A'; b.style.background = '#2A2A2A'; }
+      });
+    };
+
+    document.getElementById('oxaSubmit').onclick = async () => {
+      const amount = Number(customInput.value || 0);
+      if (!amount || amount < minAmount) { toast(`${t('deposit.min_amount')}: ${minAmount}$`); return; }
+      await createOxaPayWhiteLabel(amount, coin.sym, network.id);
+    };
+  }
+
+  async function createOxaPayWhiteLabel(amount, payCurrency, network) {
+    toast(t('deposit.creating_invoice'));
+    try {
+      const res = await apiFetch('/api/deposit/oxapay/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount, pay_currency: payCurrency, network })
+      });
+      const data = await res.json();
+
+      if (data.ok) {
+        showOxaPayPaymentScreen(data);
+      } else {
+        toast(data.error || t('toast.error'));
+      }
+    } catch (e) {
+      console.error('OxaPay error', e);
+      toast(t('toast.error'));
+    }
+  }
+
+  function showOxaPayPaymentScreen(payData) {
+    const { track_id, address, memo, pay_amount, pay_currency, network, qr_code, expired_at } = payData;
+    const waitText = t('deposit.waiting');
+    const sendText = t('deposit.send_exact');
+    const amountLabel = t('history.amount');
+    const networkLabel = t('history.network');
+    const addressLabel = t('history.address');
+    const memoLabel = 'Memo / Tag';
+    const copiedText = t('deposit.copied');
+    const cancelText = t('btn.cancel');
+    const paidText = t('deposit.status_paid');
+    const creditedText = t('deposit.credited');
+
+    const memoSection = memo ? `
+      <div style="margin-top:12px">
+        <div style="font-size:12px;color:#7B8CA2;margin-bottom:6px">${memoLabel}</div>
+        <div style="display:flex;align-items:center;gap:8px;background:#0A0E17;border-radius:6px;padding:10px 12px">
+          <span id="memoText" style="flex:1;color:#E040FB;font-size:14px;font-weight:600;word-break:break-all">${memo}</span>
+          <button id="copyMemo" style="background:#2A2A2A;border:1px solid #3A3A3A;border-radius:6px;padding:6px 12px;color:#fff;font-size:12px;cursor:pointer">📋</button>
+        </div>
+      </div>` : '';
+
+    const timeLeft = expired_at ? Math.max(0, Math.floor((expired_at * 1000 - Date.now()) / 1000)) : 3600;
+
+    cont.innerHTML = `
+    <div class="container" style="padding:16px">
+      <div style="text-align:center;padding:16px 0">
+        <div id="paySpinner" style="margin-bottom:16px">
+          <div style="width:60px;height:60px;margin:0 auto;border:3px solid rgba(255,255,255,0.08);border-top-color:#E040FB;border-radius:50%;animation:spin 1s linear infinite"></div>
+        </div>
+        <div id="payIcon" style="display:none;font-size:56px;margin-bottom:16px">✅</div>
+        <h2 id="payTitle" style="color:#EAECEF;margin-bottom:6px;font-size:18px">${waitText}</h2>
+        <p style="color:#7B8CA2;font-size:13px;margin-bottom:4px">${sendText}</p>
+        <p id="payTimer" style="color:#E040FB;font-size:13px;font-weight:600"></p>
+      </div>
+
+      ${qr_code ? `<div style="text-align:center;margin-bottom:16px"><img src="${qr_code}" style="width:180px;height:180px;border-radius:8px;background:#fff;padding:8px" onerror="this.style.display='none'"/></div>` : ''}
+
+      <div style="background:#131A2A;border-radius:8px;padding:16px;margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:12px">
+          <span style="color:#7B8CA2;font-size:13px">${amountLabel}</span>
+          <span style="color:#00E676;font-size:16px;font-weight:700">${pay_amount} ${pay_currency}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:12px">
+          <span style="color:#7B8CA2;font-size:13px">${networkLabel}</span>
+          <span style="color:#EAECEF;font-size:14px;font-weight:600">${network}</span>
+        </div>
+
+        <div>
+          <div style="font-size:12px;color:#7B8CA2;margin-bottom:6px">${addressLabel}</div>
+          <div style="display:flex;align-items:center;gap:8px;background:#0A0E17;border-radius:6px;padding:10px 12px">
+            <span id="addrText" style="flex:1;color:#E040FB;font-size:13px;font-weight:600;word-break:break-all">${address}</span>
+            <button id="copyAddr" style="background:#2A2A2A;border:1px solid #3A3A3A;border-radius:6px;padding:6px 12px;color:#fff;font-size:12px;cursor:pointer">📋</button>
+          </div>
+        </div>
+        ${memoSection}
+      </div>
+
+      <div id="payStatusBar" style="background:#131A2A;border-radius:8px;padding:12px 16px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center">
+        <span style="color:#7B8CA2;font-size:13px">${t('profile.status')}</span>
+        <span id="payStatus" style="color:#E040FB;font-weight:600;font-size:13px">${t('deposit.status_waiting')}</span>
+      </div>
+
+      <button class="btn" id="cancelPay" style="width:100%;background:rgba(255,255,255,0.08);padding:14px;font-size:14px">${cancelText}</button>
+    </div>
+    <style>@keyframes spin { to { transform: rotate(360deg); } }</style>`;
+
+    document.getElementById('copyAddr').onclick = () => {
+      navigator.clipboard.writeText(address).then(() => toast(copiedText)).catch(() => {
+        const ta = document.createElement('textarea'); ta.value = address; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); toast(copiedText);
+      });
+    };
+    if (memo && document.getElementById('copyMemo')) {
+      document.getElementById('copyMemo').onclick = () => {
+        navigator.clipboard.writeText(memo).then(() => toast(copiedText)).catch(() => {
+          const ta = document.createElement('textarea'); ta.value = memo; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); toast(copiedText);
+        });
+      };
+    }
+
+    let remaining = timeLeft;
+    const timerInterval = setInterval(() => {
+      remaining--;
+      if (remaining <= 0) { clearInterval(timerInterval); document.getElementById('payTimer').textContent = t('deposit.time_expired'); return; }
+      const m = Math.floor(remaining / 60); const s = remaining % 60;
+      document.getElementById('payTimer').textContent = `⏳ ${m}:${s.toString().padStart(2,'0')}`;
+    }, 1000);
+    const m0 = Math.floor(remaining / 60); const s0 = remaining % 60;
+    document.getElementById('payTimer').textContent = `⏳ ${m0}:${s0.toString().padStart(2,'0')}`;
+
+    document.getElementById('cancelPay').onclick = () => { clearInterval(timerInterval); clearInterval(pollInterval); renderAssets(); };
+
+    let pollCount = 0;
+    const pollInterval = setInterval(async () => {
+      pollCount++;
+      if (pollCount > 720) { clearInterval(pollInterval); return; }
+      try {
+        const res = await apiFetch(`/api/deposit/oxapay/check?track_id=${track_id}`);
+        const data = await res.json();
+        if (data.paid) {
+          clearInterval(pollInterval); clearInterval(timerInterval);
+          document.getElementById('paySpinner').style.display = 'none';
+          document.getElementById('payIcon').style.display = 'block';
+          document.getElementById('payTitle').textContent = paidText;
+          document.getElementById('payTitle').style.color = '#00E676';
+          document.getElementById('payStatus').textContent = paidText;
+          document.getElementById('payStatus').style.color = '#00E676';
+          document.getElementById('payTimer').textContent = '';
+          toast(t('deposit.credited_toast'));
+          setTimeout(() => renderAssets(), 2500);
+        } else if (data.status) {
+          const sMap = { 'waiting': t('deposit.status_waiting'), 'new': t('deposit.status_waiting'), 'confirming': t('deposit.status_confirming'), 'expired': t('deposit.status_expired') };
+          document.getElementById('payStatus').textContent = sMap[data.status] || data.status;
+          if (data.status === 'expired') { clearInterval(pollInterval); clearInterval(timerInterval); document.getElementById('paySpinner').style.display = 'none'; }
+        }
+      } catch (e) { console.error('OxaPay poll error', e); }
+    }, 5000);
+  }
+
 }
 
 // -------- Withdraw ----------
@@ -1562,78 +1551,57 @@ async function openWithdraw(){
   setActive('assets');
   const cont=document.getElementById('root');
   
-  // Get user info and rates
-  let user = { preferred_fiat: 'RUB' };
-  let rates = { usd_rub: 78, usd_uah: 42.2, usd_byn: 2.92 };
+  let user = {};
   try {
     user = await (await apiFetch('/api/user')).json();
-    const ratesRes = await apiFetch('/api/rates');
-    rates = await ratesRes.json();
-  } catch(e) { console.error('Failed to load data', e); }
+  } catch(e) { console.error('Failed to load user', e); }
   
-  const prefFiat = user.preferred_fiat || 'RUB';
-  const fiatSymbol = CURRENCY_SYMBOLS[prefFiat] || '₽';
-  const rateKey = `usd_${prefFiat.toLowerCase()}`;
-  const fiatRate = rates[rateKey] || rates.usd_rub || 78;
+  const totalBalance = user.balance_usdt || 0;
+  const MIN_USDT = 10;
+  const quickAmounts = [10, 25, 50, 100, 250, 500];
   
-  // Calculate minimum in user's currency (630 USD)
-  const MIN_IN_FIAT = getMinWithdrawInFiat(prefFiat);
-  const MIN_USD = MIN_IN_FIAT / fiatRate;
-  
-  // Show minimum in user's currency
-  const minNotice = `💡 ${t('withdraw.min_withdrawal')}: ${Math.ceil(MIN_IN_FIAT).toLocaleString()} ${fiatSymbol}`;
-  
-  // Quick amounts based on currency
-  let quickAmounts;
-  if (prefFiat === 'RUB') {
-    quickAmounts = [60000, 80000, 100000, 150000];
-  } else if (prefFiat === 'UAH') {
-    quickAmounts = [26000, 35000, 42000, 60000];
-  } else { // BYN
-    quickAmounts = [2000, 2500, 3000, 4000];
-  }
+  const networks = [
+    { id: 'TRC20', name: 'Tron (TRC20)', hint: 'T...' },
+    { id: 'ERC20', name: 'Ethereum (ERC20)', hint: '0x...' },
+    { id: 'BEP20', name: 'BSC (BEP20)', hint: '0x...' },
+    { id: 'SOL', name: 'Solana', hint: '...' },
+    { id: 'TON', name: 'TON', hint: 'UQ...' },
+  ];
   
   cont.innerHTML = `
   <div class="container">
     <button class="btn" id="backAssets" style="background:transparent;border:none;color:#fff;font-size:16px;padding:8px 0;margin-bottom:16px">← ${t('btn.back')}</button>
     <div class="section" style="margin-top:10px">
-      <div class="section-header"><div class="section-title">💸 ${t('withdraw.to_card')}</div></div>
+      <div class="section-header"><div class="section-title">💸 ${t('withdraw.to_crypto')}</div></div>
       <div class="section-content">
-        <label class="label">${t('withdraw.amount_fiat')} (${fiatSymbol})</label>
-        <input type="number" inputmode="numeric" id="wAmount" class="input" placeholder="${Math.round(MIN_IN_FIAT)}" min="${Math.round(MIN_IN_FIAT)}" step="1000" style="font-size:18px;font-weight:600"/>
+        <div style="background:#131A2A;border-radius:6px;padding:14px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center">
+          <span style="color:#7B8CA2">${t('common.balance')}:</span>
+          <span style="color:#00E676;font-weight:700;font-size:18px">${fmtNum(totalBalance, 2)} USDT</span>
+        </div>
+        
+        <label class="label">${t('withdraw.amount')} (USDT)</label>
+        <input type="number" inputmode="decimal" id="wAmount" class="input" placeholder="${MIN_USDT}" min="${MIN_USDT}" step="0.01" style="font-size:18px;font-weight:600"/>
         
         <div id="quickAmounts" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">
-          ${quickAmounts.map(amt => `
-            <button class="quick-btn" data-amount="${amt}" style="padding:10px 16px;background:#1E2329;border:1px solid #333;border-radius:6px;color:#fff;cursor:pointer;font-weight:600;transition:all 0.2s">${amt.toLocaleString()} ${fiatSymbol}</button>
+          ${quickAmounts.filter(a => a <= totalBalance).map(amt => `
+            <button class="quick-btn" data-amount="${amt}" style="padding:10px 16px;background:#131A2A;border:1px solid #333;border-radius:6px;color:#fff;cursor:pointer;font-weight:600;transition:all 0.2s">${amt} USDT</button>
+          `).join('')}
+          <button class="quick-btn" data-amount="${Number(totalBalance).toFixed(2)}" style="padding:10px 16px;background:#131A2A;border:1px solid #333;border-radius:6px;color:#E040FB;cursor:pointer;font-weight:600;transition:all 0.2s">${t('btn.all')}</button>
+        </div>
+        
+        <div class="notice small" style="margin-top:12px">💡 ${t('withdraw.min_withdrawal')}: ${MIN_USDT} USDT | ${t('withdraw.commission')}: 0%</div>
+        
+        <label class="label" style="margin-top:16px">${t('withdraw.network')}</label>
+        <div id="networkSelect" style="display:flex;flex-wrap:wrap;gap:8px">
+          ${networks.map((n, i) => `
+            <button class="net-btn" data-network="${n.id}" style="padding:10px 14px;background:${i === 0 ? 'rgba(224,64,251,0.12)' : '#131A2A'};border:1px solid ${i === 0 ? '#E040FB' : '#333'};border-radius:6px;color:#fff;cursor:pointer;font-size:13px;font-weight:600;transition:all 0.2s">${n.name}</button>
           `).join('')}
         </div>
         
-        <div class="notice small" style="margin-top:12px">${minNotice}</div>
+        <label class="label" style="margin-top:16px">${t('withdraw.address')}</label>
+        <input type="text" id="wAddress" class="input" placeholder="${networks[0].hint}" style="font-family:monospace;font-size:14px"/>
         
-        <div id="wCalcBox" style="margin-top:16px;padding:14px;background:rgba(240,185,11,0.1);border:1px solid rgba(240,185,11,0.2);border-radius:6px;display:none">
-          <div style="display:flex;justify-content:space-between;margin-bottom:8px">
-            <span style="color:#9ca3af">${i18n.lang === 'ru' ? 'Сумма в $' : 'Amount in $'}:</span>
-            <span style="color:#fff;font-weight:600" id="wUsdtAmount">0$</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;border-top:1px solid rgba(98,77,228,0.3);padding-top:8px;margin-top:8px">
-            <span style="color:#9ca3af">${i18n.lang === 'ru' ? 'К списанию' : 'To be charged'}:</span>
-            <span style="color:#F0B90B;font-weight:700" id="wTotal">0$</span>
-          </div>
-          <div style="font-size:11px;color:#666;margin-top:8px;text-align:center">${i18n.lang === 'ru' ? 'Курс' : 'Rate'}: 1$ = <span id="wRate">${fiatRate.toFixed(2)}</span> ${fiatSymbol}</div>
-        </div>
-        
-        <div class="inline" style="margin-top:16px;gap:12px">
-          <div style="flex:2">
-            <label class="label">${i18n.lang === 'ru' ? 'Номер карты' : 'Card Number'}</label>
-            <input type="tel" inputmode="numeric" id="wCard" class="input" placeholder="4000000000000000" style="font-family:monospace"/>
-          </div>
-          <div style="flex:3">
-            <label class="label">${i18n.lang === 'ru' ? 'ФИО получателя' : 'Recipient Name'}</label>
-            <input type="text" id="wName" class="input" placeholder="${i18n.lang === 'ru' ? 'Иванов Иван Иванович' : 'John Doe'}"/>
-          </div>
-        </div>
-        
-        <button class="btn btn-purple fullwidth" id="wSubmit" style="margin-top:16px;padding:16px;font-size:16px" disabled>${t('withdraw.submit')}</button>
+        <button class="btn btn-primary fullwidth" id="wSubmit" style="margin-top:20px;padding:16px;font-size:16px;background:#E040FB;border-radius:6px" disabled>${t('withdraw.submit')}</button>
         <div class="small" id="wCalc" style="margin-top:8px;text-align:center"></div>
       </div>
     </div>
@@ -1641,90 +1609,72 @@ async function openWithdraw(){
   
   document.getElementById('backAssets').onclick = renderAssets;
   const amountEl=document.getElementById('wAmount');
-  const cardEl=document.getElementById('wCard');
-  const nameEl=document.getElementById('wName');
+  const addressEl=document.getElementById('wAddress');
   const btn=document.getElementById('wSubmit');
   const calcEl=document.getElementById('wCalc');
-  const calcBox=document.getElementById('wCalcBox');
-  const usdtAmountEl=document.getElementById('wUsdtAmount');
-  const feeEl=document.getElementById('wFee');
-  const totalEl=document.getElementById('wTotal');
+  let selectedNetwork = networks[0].id;
   
-  const MIN_WITHDRAW = MIN_IN_FIAT;
-  const FEE_PERCENT = 0;
-  
-  // Быстрые кнопки
-  document.querySelectorAll('.quick-btn').forEach(btn => {
-    btn.onclick = () => {
-      amountEl.value = btn.getAttribute('data-amount');
-      document.querySelectorAll('.quick-btn').forEach(b => {
-        b.style.borderColor = '#333';
-        b.style.background = '#1E1E1E';
-      });
-      btn.style.borderColor = '#F0B90B';
-      btn.style.background = 'rgba(98,77,228,0.2)';
+  document.querySelectorAll('.net-btn').forEach(nb => {
+    nb.onclick = () => {
+      selectedNetwork = nb.dataset.network;
+      document.querySelectorAll('.net-btn').forEach(b => { b.style.borderColor = '#333'; b.style.background = '#131A2A'; });
+      nb.style.borderColor = '#E040FB';
+      nb.style.background = 'rgba(224,64,251,0.12)';
+      const net = networks.find(n => n.id === selectedNetwork);
+      if (net) addressEl.placeholder = net.hint;
       recalc();
     };
-    btn.onmouseenter = () => { if(btn.style.borderColor !== 'rgb(98, 77, 228)') btn.style.borderColor = '#555'; };
-    btn.onmouseleave = () => { if(btn.style.borderColor !== 'rgb(98, 77, 228)') btn.style.borderColor = '#333'; };
   });
   
-  async function recalc(){
+  document.querySelectorAll('.quick-btn').forEach(qb => {
+    qb.onclick = () => {
+      amountEl.value = qb.dataset.amount;
+      document.querySelectorAll('.quick-btn').forEach(b => { b.style.borderColor = '#333'; b.style.background = '#131A2A'; b.style.color = '#fff'; });
+      qb.style.borderColor = '#E040FB';
+      qb.style.background = 'rgba(224,64,251,0.12)';
+      recalc();
+    };
+  });
+  
+  function recalc(){
     const a = Number(amountEl.value||0);
-    const card = (cardEl.value||'').replace(/\s+/g,'');
-    const name = (nameEl.value||'').trim();
+    const addr = (addressEl.value||'').trim();
+    btn.disabled = !(a >= MIN_USDT && a <= totalBalance && addr.length >= 10);
     
-    btn.disabled = !(a >= MIN_WITHDRAW && card.length >= 13 && name.length >= 3);
-    
-    if(a > 0 && a < MIN_WITHDRAW){
-      const minDisplay = `${Math.ceil(MIN_WITHDRAW).toLocaleString('ru-RU')} ${fiatSymbol}`;
-      calcEl.innerHTML = `<span style="color:#F6465D;font-weight:bold;">❌ ${i18n.lang === 'ru' ? 'Минимум' : 'Minimum'}: ${minDisplay}</span>`;
-      amountEl.style.borderColor = '#F6465D';
-      calcBox.style.display = 'none';
-    } else if(a >= MIN_WITHDRAW){
-      amountEl.style.borderColor = '#F0B90B';
+    if(a > 0 && a < MIN_USDT){
+      calcEl.innerHTML = `<span style="color:#FF5252;font-weight:bold;">❌ ${t('withdraw.min_error')}: ${MIN_USDT} USDT</span>`;
+      amountEl.style.borderColor = '#FF5252';
+    } else if(a > totalBalance){
+      calcEl.innerHTML = `<span style="color:#FF5252;font-weight:bold;">❌ ${t('withdraw.insufficient')}</span>`;
+      amountEl.style.borderColor = '#FF5252';
+    } else if(a >= MIN_USDT){
+      amountEl.style.borderColor = '#E040FB';
       calcEl.textContent = '';
-      calcBox.style.display = 'block';
-      
-      const usdtAmount = a / fiatRate;
-      const fee = usdtAmount * (FEE_PERCENT / 100);
-      const total = usdtAmount + fee;
-      
-      usdtAmountEl.textContent = `${usdtAmount.toFixed(2)}$`;
-      totalEl.textContent = `${total.toFixed(2)}$`;
-    } else { 
+    } else {
       amountEl.style.borderColor = '';
       calcEl.textContent = '';
-      calcBox.style.display = 'none';
     }
   }
   
   amountEl.oninput = recalc;
-  cardEl.oninput = recalc;
-  nameEl.oninput = recalc;
+  addressEl.oninput = recalc;
   recalc();
   
   btn.onclick = async () => {
-    const payload = {
-      amount_rub: Number(amountEl.value||0),
-      card_number: (cardEl.value||'').replace(/\s+/g,''),
-      full_name: (nameEl.value||'').trim()
-    };
+    const amount = Number(amountEl.value||0);
+    const address = (addressEl.value||'').trim();
     
-    if(!payload.card_number || payload.card_number.length < 13) {
-      toast('Введите корректный номер карты');
+    if(address.length < 10) {
+      toast(t('withdraw.invalid_address'));
       return;
     }
     
-    if(!payload.full_name || payload.full_name.length < 3) {
-      toast('Введите ФИО получателя');
-      return;
-    }
+    const payload = { amount, currency: 'USDT', address, network: selectedNetwork };
     
     try{
       const res = await apiFetch('/api/withdraw',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
       const data = await res.json();
-      if(data.ok){ toast('✅ Заявка отправлена!'); renderAssets(); } else toast(data.error||t('toast.error'));
+      if(data.ok){ toast(t('withdraw.submitted')); renderAssets(); } else toast(data.error||t('toast.error'));
     }catch(e){ toast(t('toast.error')); }
   };
 }
@@ -1735,60 +1685,54 @@ async function openExchange(){
   const cont=document.getElementById('root');
   
   // Get user data and rates
-  let user = { balance_usdt: 0, balance_rub: 0, wallets: {}, preferred_fiat: 'RUB' };
+  let user = { balance_usdt: 0, wallets: {} };
   await updateRates();
   try { 
     user = await (await apiFetch('/api/user')).json();
   } catch(e) {}
   
-  const prefFiat = user.preferred_fiat || 'RUB';
-  const fiatSymbol = CURRENCY_SYMBOLS[prefFiat] || '₽';
-  const fiatRate = getRateForCurrency(prefFiat);
-  
-  const allOptions = [prefFiat,'USDT','BTC','ETH','TON','SOL','BNB','XRP','DOGE','LTC','TRX'];
   const cryptoOptions = ['USDT','BTC','ETH','TON','SOL','BNB','XRP','DOGE','LTC','TRX'];
-  const fiatDisplay = `${fiatSymbol} ${prefFiat}`;
-  const fromOptions = allOptions.map(c => `<option value="${c}"${c === 'USDT' ? ' selected' : ''}>${c === prefFiat ? fiatDisplay : c}</option>`).join('');
-  const toOptions = allOptions.filter(c => c !== 'USDT').map(c => `<option value="${c}"${c === prefFiat ? ' selected' : ''}>${c === prefFiat ? fiatDisplay : c}</option>`).join('');
+  const fromOptions = cryptoOptions.map(c => `<option value="${c}"${c === 'USDT' ? ' selected' : ''}>${c}</option>`).join('');
+  const toOptions = cryptoOptions.filter(c => c !== 'USDT').map(c => `<option value="${c}"${c === 'BTC' ? ' selected' : ''}>${c}</option>`).join('');
   
   cont.innerHTML = `
   <div class="container">
     <button class="btn" id="backAssets" style="background:transparent;border:none;color:#fff;font-size:16px;padding:8px 0;margin-bottom:16px">← ${t('btn.back')}</button>
     <div class="section" style="margin-top:10px">
-      <div class="section-header"><div class="section-title">🔄 Обмен валют</div></div>
+      <div class="section-header"><div class="section-title">🔄 ${t('exchange.title')}</div></div>
       <div class="section-content">
-        <div style="background:rgba(240,185,11,0.1);border:1px solid rgba(240,185,11,0.2);border-radius:6px;padding:14px;margin-bottom:16px">
-          <div style="font-size:12px;color:#9ca3af;margin-bottom:4px">Доступный баланс</div>
-          <div id="exAvailBalance" style="font-size:20px;font-weight:700;color:#0ECB81">${Number(user.balance_usdt||0).toFixed(2)} USDT</div>
+        <div style="background:rgba(224,64,251,0.08);border:1px solid rgba(224,64,251,0.15);border-radius:6px;padding:14px;margin-bottom:16px">
+          <div style="font-size:12px;color:#9ca3af;margin-bottom:4px">${t('exchange.available_balance')}</div>
+          <div id="exAvailBalance" style="font-size:20px;font-weight:700;color:#00E676">${fmtNum(user.balance_usdt||0, 2)} USDT</div>
         </div>
         
         <div class="inline" style="gap:8px;align-items:flex-end">
           <div style="flex:1">
-            <label class="label">Отдаю</label>
-            <select id="exFrom" style="width:100%;padding:12px;border-radius:6px;border:1px solid #333;background:#1E2329;color:#fff;font-size:15px">${fromOptions}</select>
+            <label class="label">${t('exchange.give')}</label>
+            <select id="exFrom" style="width:100%;padding:12px;border-radius:6px;border:1px solid #333;background:#131A2A;color:#fff;font-size:15px">${fromOptions}</select>
           </div>
-          <button id="exSwap" style="padding:12px;background:#F0B90B;border:none;border-radius:6px;color:#fff;font-size:18px;cursor:pointer;margin-bottom:0;min-width:48px" title="Поменять местами">⇄</button>
+          <button id="exSwap" style="padding:12px;background:#E040FB;border:none;border-radius:6px;color:#fff;font-size:18px;cursor:pointer;margin-bottom:0;min-width:48px" title="${t('exchange.swap')}">⇄</button>
           <div style="flex:1">
-            <label class="label">Получаю</label>
-            <select id="exTo" style="width:100%;padding:12px;border-radius:6px;border:1px solid #333;background:#1E2329;color:#fff;font-size:15px">${toOptions}</select>
+            <label class="label">${t('exchange.receive')}</label>
+            <select id="exTo" style="width:100%;padding:12px;border-radius:6px;border:1px solid #333;background:#131A2A;color:#fff;font-size:15px">${toOptions}</select>
           </div>
         </div>
         
         <div style="margin-top:16px">
-          <label class="label">Сумма</label>
+          <label class="label">${t('withdraw.amount')}</label>
           <div style="display:flex;gap:8px">
             <input type="number" inputmode="decimal" id="exAmount" class="input" placeholder="0.00" style="flex:1;font-size:18px"/>
-            <button id="exMax" style="padding:10px 16px;background:rgba(240,185,11,0.15);border:1px solid rgba(240,185,11,0.3);border-radius:6px;color:#F0B90B;font-weight:600;cursor:pointer">MAX</button>
+            <button id="exMax" style="padding:10px 16px;background:rgba(224,64,251,0.12);border:1px solid rgba(224,64,251,0.3);border-radius:6px;color:#E040FB;font-weight:600;cursor:pointer">MAX</button>
           </div>
         </div>
         
-        <div id="exQuote" style="min-height:24px;margin-top:12px;padding:14px;background:rgba(0,200,83,0.1);border-radius:6px;text-align:center;font-weight:600;color:#0ECB81;display:none"></div>
+        <div id="exQuote" style="min-height:24px;margin-top:12px;padding:14px;background:rgba(0,200,83,0.1);border-radius:6px;text-align:center;font-weight:600;color:#00E676;display:none"></div>
         
-        <div id="exRateInfo" style="margin-top:12px;padding:10px;background:#1E2329;border-radius:6px;text-align:center;font-size:12px;color:#9ca3af;display:none">
-          <span id="exRateText">${i18n.lang === 'ru' ? 'Курс' : 'Rate'}: 1$ = ${fiatRate.toFixed(2)} ${fiatSymbol}</span> • ${i18n.lang === 'ru' ? 'Комиссия' : 'Fee'} 2%
+        <div id="exRateInfo" style="margin-top:12px;padding:10px;background:#131A2A;border-radius:6px;text-align:center;font-size:12px;color:#9ca3af">
+          ${t('exchange.commission')}: 2%
         </div>
         
-        <button class="btn btn-green fullwidth" id="exSubmit" style="margin-top:16px;padding:16px;font-size:16px;border-radius:6px">🔄 Обменять</button>
+        <button class="btn btn-green fullwidth" id="exSubmit" style="margin-top:16px;padding:16px;font-size:16px;border-radius:6px">${t('exchange.submit')}</button>
       </div>
     </div>
   </div>`;
@@ -1796,23 +1740,11 @@ async function openExchange(){
   document.getElementById('backAssets').onclick = renderAssets;
   const fromEl=document.getElementById('exFrom'), toEl=document.getElementById('exTo'), amtEl=document.getElementById('exAmount'), qEl=document.getElementById('exQuote');
   const balEl=document.getElementById('exAvailBalance');
-  const rateInfoEl=document.getElementById('exRateInfo');
-  const rateTextEl=document.getElementById('exRateText');
   
-  // Check if user's fiat currency is involved in exchange
-  function isFiatExchange() {
-    return fromEl.value === prefFiat || toEl.value === prefFiat;
-  }
-  
-  // Update available balance when currency changes
   function updateBalance() {
     const sym = fromEl.value;
     let bal, decimals, suffix;
-    if (sym === prefFiat) {
-      bal = user.balance_rub || 0;
-      decimals = 2;
-      suffix = fiatSymbol;
-    } else if (sym === 'USDT') {
+    if (sym === 'USDT') {
       bal = user.balance_usdt || 0;
       decimals = 2;
       suffix = 'USDT';
@@ -1821,55 +1753,28 @@ async function openExchange(){
       decimals = 6;
       suffix = sym;
     }
-    balEl.textContent = `${Number(bal||0).toFixed(decimals)} ${suffix}`;
+    balEl.textContent = `${fmtNum(bal||0, decimals)} ${suffix}`;
   }
   
-  // Update "to" select based on "from" selection
   function updateToOptions() {
     const fromVal = fromEl.value;
     const currentTo = toEl.value;
     let newToVal = currentTo;
-    
-    // If same currency selected, auto-switch
     if (fromVal === currentTo) {
-      if (fromVal === prefFiat) newToVal = 'USDT';
-      else if (fromVal === 'USDT') newToVal = prefFiat;
-      else newToVal = 'USDT';
+      newToVal = fromVal === 'USDT' ? 'BTC' : 'USDT';
     }
-    
-    // If fiat is selected, only allow USDT as target
-    let availableOptions;
-    if (fromVal === prefFiat) {
-      availableOptions = ['USDT'];
-    } else if (fromVal === 'USDT') {
-      availableOptions = [prefFiat, ...cryptoOptions.filter(c => c !== 'USDT')];
-    } else {
-      availableOptions = ['USDT', ...cryptoOptions.filter(c => c !== 'USDT' && c !== fromVal)];
-    }
-    
+    const availableOptions = cryptoOptions.filter(c => c !== fromVal);
     toEl.innerHTML = availableOptions
-      .map(c => `<option value="${c}"${c === newToVal ? ' selected' : ''}>${c === prefFiat ? fiatDisplay : c}</option>`)
+      .map(c => `<option value="${c}"${c === newToVal ? ' selected' : ''}>${c}</option>`)
       .join('');
-    
-    // Show rate info for fiat exchanges
-    if (isFiatExchange()) {
-      rateInfoEl.style.display = 'block';
-      rateTextEl.textContent = `${i18n.lang === 'ru' ? 'Курс' : 'Rate'}: 1$ = ${fiatRate.toFixed(2)} ${fiatSymbol}`;
-    } else {
-      rateInfoEl.style.display = 'none';
-    }
   }
   
-  // Swap button
   document.getElementById('exSwap').onclick = () => {
     const fromVal = fromEl.value;
     const toVal = toEl.value;
-    
-    // Rebuild from options
-    fromEl.innerHTML = allOptions
-      .map(c => `<option value="${c}"${c === toVal ? ' selected' : ''}>${c === prefFiat ? fiatDisplay : c}</option>`)
+    fromEl.innerHTML = cryptoOptions
+      .map(c => `<option value="${c}"${c === toVal ? ' selected' : ''}>${c}</option>`)
       .join('');
-    
     updateToOptions();
     toEl.value = fromVal;
     updateBalance();
@@ -1877,24 +1782,21 @@ async function openExchange(){
     qEl.style.display = 'none';
   };
   
-  // Max button
   document.getElementById('exMax').onclick = () => {
     const sym = fromEl.value;
     let bal;
-    if (sym === prefFiat) bal = user.balance_rub || 0;
-    else if (sym === 'USDT') bal = user.balance_usdt || 0;
+    if (sym === 'USDT') bal = user.balance_usdt || 0;
     else bal = user.wallets?.[sym] || 0;
-    amtEl.value = Number(bal||0).toFixed(sym === prefFiat || sym === 'USDT' ? 2 : 6);
+    amtEl.value = Number(bal||0).toFixed(sym === 'USDT' ? 2 : 6);
     quote();
   };
   
-  // Initialize
   updateToOptions();
   updateBalance();
   
   function validateSame(){ 
     if(fromEl.value===toEl.value){ 
-      qEl.textContent='Нельзя выбрать одинаковую валюту'; 
+      qEl.textContent=t('exchange.same_currency'); 
       qEl.style.display='block';
       qEl.style.background='rgba(239,68,68,0.1)';
       qEl.style.color='#ef4444';
@@ -1917,19 +1819,15 @@ async function openExchange(){
     }
     try{
       let r;
-      if (isFiatExchange()) {
-        r = await (await apiFetch(`/api/exchange/rub/quote?from=${fromEl.value}&to=${toEl.value}&amount=${a}`)).json();
-      } else {
-        r = await (await apiFetch(`/api/exchange/quote?from=${fromEl.value}&to=${toEl.value}&amount=${a}`)).json();
-      }
+      r = await (await apiFetch(`/api/exchange/quote?from=${fromEl.value}&to=${toEl.value}&amount=${a}`)).json();
       lastQuote = r;
       const toSym = toEl.value;
-      const toDecimals = toSym === prefFiat ? 2 : (toSym === 'USDT' ? 2 : 6);
-      const toSuffix = toSym === prefFiat ? fiatSymbol : toSym;
-      qEl.innerHTML = `${i18n.lang === 'ru' ? 'Вы получите' : 'You receive'}: <span style="font-size:18px;font-weight:700">${Number(r.amount_to||0).toFixed(toDecimals)} ${toSuffix}</span>`;
+      const toDecimals = toSym === 'USDT' ? 2 : 6;
+      const toSuffix = toSym;
+      qEl.innerHTML = `${t('exchange.you_receive_short')}: <span style="font-size:18px;font-weight:700">${fmtNum(r.amount_to||0, toDecimals)} ${toSuffix}</span>`;
       qEl.style.display='block';
       qEl.style.background='rgba(0,200,83,0.1)';
-      qEl.style.color='#0ECB81';
+      qEl.style.color='#00E676';
     }catch(e){ 
       qEl.style.display='none'; 
       lastQuote=null; 
@@ -1939,38 +1837,25 @@ async function openExchange(){
   document.getElementById('exSubmit').onclick = async ()=>{
     if(!validateSame()) return;
     const amount = Number(amtEl.value||0);
-    if(amount <= 0) { toast('Введите сумму'); return; }
+    if(amount <= 0) { toast(t('exchange.enter_amount')); return; }
     
     try{
       let res, data;
-      
-      if (isFiatExchange()) {
-        // Use fiat exchange API
-        const payload = {
-          from_currency: fromEl.value,
-          to_currency: toEl.value,
-          amount: amount
-        };
-        res = await apiFetch('/api/exchange/rub', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
-      } else {
-        // Use crypto exchange API
-        const payload = {
-          from: fromEl.value,
-          to: toEl.value,
-          amount: amount,
-          expected_amount_to: lastQuote?.amount_to
-        };
-        res = await apiFetch('/api/exchange',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
-      }
-      
+      const payload = {
+        from: fromEl.value,
+        to: toEl.value,
+        amount: amount,
+        expected_amount_to: lastQuote?.amount_to
+      };
+      res = await apiFetch('/api/exchange',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
       data = await res.json();
       if(data.ok){ 
-        toast('✅ Обмен выполнен'); 
+        toast('✅ ' + t('exchange.completed')); 
         lastQuote = null;
         renderAssets(); 
       } else {
         toast(data.error||t('toast.error'));
-        if(data.error && data.error.includes('Курс изменился')){
+        if(data.error && data.error.includes(t('exchange.rate_changed'))){
           setTimeout(() => quote(), 500);
         }
       }
@@ -1988,10 +1873,10 @@ async function openWallet(sym){
   const bal = user.wallets?.[sym] ?? (sym==='USDT'? user.balance_usdt: 0);
   cont.innerHTML = `
   <div class="container">
-    <button class="btn" id="backAssets">← Назад</button>
+    <button class="btn" id="backAssets">${'← ' + t('btn.back')}</button>
     <div class="balance-card" style="margin-top:10px">
       <div class="small">${sym} ${t('common.balance')}</div>
-      <div class="balance-amount">${Number(bal||0).toFixed(6)} <span class="currency">${sym}</span></div>
+      <div class="balance-amount">${fmtNum(bal||0, 6)} <span class="currency">${sym}</span></div>
       <div class="balance-actions">
         <button class="btn btn-primary" id="wDep">${t('btn.deposit')}</button>
         <button class="btn btn-green" id="wEx">${t('btn.exchange')}</button>
@@ -2007,16 +1892,6 @@ async function openWallet(sym){
   document.getElementById('wEx').onclick = openExchange;
   document.getElementById('whToggle').onclick = ()=> document.getElementById('walletHist').classList.toggle('hidden');
   
-  // Add Create Check button for admin (USDT wallet only)
-  const isAdmin = userData?.is_admin === true;
-  if (isAdmin && sym === 'USDT') {
-    const checkBtn = document.createElement('button');
-    checkBtn.className = 'btn btn-secondary';
-    checkBtn.textContent = '🎁 Создать чек';
-    checkBtn.style.marginTop = '10px';
-    checkBtn.onclick = createCheck;
-    document.querySelector('.balance-card').appendChild(checkBtn);
-  }
   const h = await (await apiFetch('/api/history?symbol='+encodeURIComponent(sym))).json();
   const wrap = document.getElementById('walletHist'); const ul=document.createElement('div');
   (h||[]).forEach(x=>{ const row=document.createElement('div'); row.className='small'; row.textContent = `${x.type} • ${x.amount} ${x.currency} • ${new Date(x.created_at).toLocaleString()}`; ul.appendChild(row); });
@@ -2026,21 +1901,27 @@ async function openWallet(sym){
 // -------- Trade ----------
 // Crypto logos mapping (using cryptocurrency-icons CDN)
 const cryptoLogos = {
-  'BTC': 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/btc.svg',
-  'ETH': 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/eth.svg',
-  'SOL': 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/sol.svg',
-  'ADA': 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/ada.svg',
-  'DOT': 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/dot.svg',
-  'LINK': 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/link.svg',
-  'MATIC': 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/matic.svg',
-  'AVAX': 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/avax.svg',
-  'XRP': 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/xrp.svg',
-  'DOGE': 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/doge.svg',
-  'SHIB': 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/shib.svg',
-  'UNI': 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/uni.svg',
-  'LTC': 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/ltc.svg',
-  'BCH': 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/bch.svg',
-  'TRX': 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/trx.svg'
+  'USDT': 'https://assets.coingecko.com/coins/images/325/small/Tether.png',
+  'BTC': 'https://assets.coingecko.com/coins/images/1/small/bitcoin.png',
+  'ETH': 'https://assets.coingecko.com/coins/images/279/small/ethereum.png',
+  'TON': 'https://assets.coingecko.com/coins/images/17980/small/ton_symbol.png',
+  'SOL': 'https://assets.coingecko.com/coins/images/4128/small/solana.png',
+  'BNB': 'https://assets.coingecko.com/coins/images/825/small/bnb-icon2_2x.png',
+  'XRP': 'https://assets.coingecko.com/coins/images/44/small/xrp-symbol-white-128.png',
+  'DOGE': 'https://assets.coingecko.com/coins/images/5/small/dogecoin.png',
+  'LTC': 'https://assets.coingecko.com/coins/images/2/small/litecoin.png',
+  'TRX': 'https://assets.coingecko.com/coins/images/1094/small/tron-logo.png',
+  'ADA': 'https://assets.coingecko.com/coins/images/975/small/cardano.png',
+  'DOT': 'https://assets.coingecko.com/coins/images/12171/small/polkadot.png',
+  'LINK': 'https://assets.coingecko.com/coins/images/877/small/chainlink-new-logo.png',
+  'MATIC': 'https://assets.coingecko.com/coins/images/4713/small/polygon.png',
+  'AVAX': 'https://assets.coingecko.com/coins/images/12559/small/Avalanche_Circle_RedWhite_Trans.png',
+  'SHIB': 'https://assets.coingecko.com/coins/images/11939/small/shiba.png',
+  'UNI': 'https://assets.coingecko.com/coins/images/12504/small/uni.png',
+  'BCH': 'https://assets.coingecko.com/coins/images/780/small/bitcoin-cash-circle.png',
+  'USDC': 'https://assets.coingecko.com/coins/images/6319/small/usdc.png',
+  'NOT': 'https://assets.coingecko.com/coins/images/36045/small/notcoin.png',
+  'DOGS': 'https://assets.coingecko.com/coins/images/39585/small/DOGS.png'
 };
 
 async function renderTrade(){
@@ -2050,7 +1931,7 @@ async function renderTrade(){
   cont.innerHTML = `
   <div class="container">
     <div class="section">
-      <div class="section-header"><div class="section-title" id="pairsTitle">📊 ${i18n.lang==='en'?'Trading Pairs':'Торговые пары'}</div></div>
+      <div class="section-header"><div class="section-title" id="pairsTitle">📊 ${t('trade.pairs_title')}</div></div>
       <div class="section-content" id="pairList"></div>
     </div>
   </div>`;
@@ -2081,7 +1962,7 @@ async function renderTrade(){
     const ticker = tickers[symbol] || { price: 0, change_24h: 0 };
     const price = ticker.price || 0;
     const change = ticker.change_24h || 0;
-    const changeColor = change >= 0 ? '#0ECB81' : '#F6465D';
+    const changeColor = change >= 0 ? '#00E676' : '#FF5252';
     const changeSign = change >= 0 ? '+' : '';
     const priceFormatted = price >= 1 ? price.toFixed(2) : price.toFixed(price < 0.001 ? 6 : 4);
     
@@ -2091,15 +1972,15 @@ async function renderTrade(){
     card.style.cssText = 'display:flex;align-items:center;padding:16px;margin:16px 0;border:1px solid rgba(100,116,139,0.4);border-radius:6px;background:rgba(15,23,42,0.3);cursor:pointer;transition:all 0.2s';
     card.innerHTML = `
       <div style="display:flex;align-items:center;gap:12px;flex:1">
-        <img src="${logo}" alt="${symbol}" style="width:38px;height:38px;border-radius:50%;background:#1E2329;padding:2px;border:1px solid rgba(240,185,11,0.2)" onerror="this.style.display='none'">
+        <img src="${logo}" alt="${symbol}" style="width:38px;height:38px;border-radius:50%;background:#131A2A;padding:2px;border:1px solid rgba(224,64,251,0.15)" onerror="this.style.display='none'">
         <div style="flex:1">
           <div style="display:flex;justify-content:space-between;align-items:center">
             <span style="font-weight:600;font-size:14px;color:#fff">${symbol}/USDT</span>
             <span style="font-weight:600;font-size:14px;color:#fff">${priceFormatted}</span>
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px">
-            <span style="font-size:11px;color:#848E9C">${name}</span>
-            <span style="font-size:12px;color:${changeColor};font-weight:500">${changeSign}${change.toFixed(2)}%</span>
+            <span style="font-size:11px;color:#7B8CA2">${name}</span>
+            <span style="font-size:12px;color:${changeColor};font-weight:500">${changeSign}${fmtNum(change, 2)}%</span>
           </div>
         </div>
       </div>
@@ -2128,123 +2009,98 @@ async function openPair(pair, displayName = null){
   const headerActions = document.querySelector('.header .actions');
   
   headerBrand.innerHTML = `<button class="btn" id="backTrade" style="background:transparent;border:none;color:#fff;font-size:20px;padding:5px 10px">←</button>`;
-  headerActions.innerHTML = `<span style="color:#fff;font-weight:600;font-size:15px;padding:6px 14px;border:1px solid #F0B90B;border-radius:6px;background:rgba(240,185,11,0.1)">${title}</span>`;
+  headerActions.innerHTML = `<span style="color:#fff;font-weight:600;font-size:15px;padding:6px 14px;border:1px solid #E040FB;border-radius:6px;background:rgba(224,64,251,0.08)">${title}</span>`;
   
   cont.innerHTML = `
-  <div class="container" style="padding:0">
+  <div class="container" style="padding:0;height:calc(100vh - 56px);overflow-y:auto;overflow-x:hidden">
     <!-- Кнопки таймфреймов -->
     <div id="timeframeBar" style="display:flex;gap:4px;padding:8px 10px;background:#0e1219;border-bottom:1px solid #1f2937;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none">
-      <button class="tf-btn" data-tf="1" style="padding:6px 12px;background:#1f2937;border:none;border-radius:4px;color:#9ca3af;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s">1м</button>
-      <button class="tf-btn active" data-tf="5" style="padding:6px 12px;background:#8b5cf6;border:none;border-radius:4px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s">5м</button>
-      <button class="tf-btn" data-tf="15" style="padding:6px 12px;background:#1f2937;border:none;border-radius:4px;color:#9ca3af;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s">15м</button>
-      <button class="tf-btn" data-tf="30" style="padding:6px 12px;background:#1f2937;border:none;border-radius:4px;color:#9ca3af;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s">30м</button>
-      <button class="tf-btn" data-tf="60" style="padding:6px 12px;background:#1f2937;border:none;border-radius:4px;color:#9ca3af;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s">1ч</button>
-      <button class="tf-btn" data-tf="240" style="padding:6px 12px;background:#1f2937;border:none;border-radius:4px;color:#9ca3af;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s">4ч</button>
-      <button class="tf-btn" data-tf="1440" style="padding:6px 12px;background:#1f2937;border:none;border-radius:4px;color:#9ca3af;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s">1д</button>
+      <button class="tf-btn" data-tf="1" style="padding:6px 12px;background:#1f2937;border:none;border-radius:4px;color:#9ca3af;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s">${t('trade.duration.1m')}</button>
+      <button class="tf-btn active" data-tf="5" style="padding:6px 12px;background:#8b5cf6;border:none;border-radius:4px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s">${t('trade.duration.5m')}</button>
+      <button class="tf-btn" data-tf="15" style="padding:6px 12px;background:#1f2937;border:none;border-radius:4px;color:#9ca3af;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s">${t('trade.duration.15m')}</button>
+      <button class="tf-btn" data-tf="30" style="padding:6px 12px;background:#1f2937;border:none;border-radius:4px;color:#9ca3af;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s">${t('trade.duration.30m')}</button>
+      <button class="tf-btn" data-tf="60" style="padding:6px 12px;background:#1f2937;border:none;border-radius:4px;color:#9ca3af;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s">${t('trade.duration.1h')}</button>
+      <button class="tf-btn" data-tf="240" style="padding:6px 12px;background:#1f2937;border:none;border-radius:4px;color:#9ca3af;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s">${t('trade.duration.4h')}</button>
+      <button class="tf-btn" data-tf="1440" style="padding:6px 12px;background:#1f2937;border:none;border-radius:4px;color:#9ca3af;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s">${t('trade.duration.1d')}</button>
     </div>
     
     <!-- TradingView Lightweight Chart (OKX Data) -->
-    <div id="price_chart" style="height:calc(50vh - 120px);width:100%;background:#0e1219;position:relative"></div>
+    <div id="price_chart" style="height:30vh;min-height:160px;max-height:280px;width:100%;background:#0e1219;position:relative"></div>
     
     <!-- Trade Parameters Block -->
-    <div id="tradeParamsBlock" style="padding:12px 15px;background:#0e1219;border-top:1px solid #1f2937">
-      <!-- Amount Input Row -->
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
-        <span style="color:#848E9C;font-size:12px;min-width:50px">${i18n.lang === 'ru' ? 'Сумма:' : 'Amount:'}</span>
+    <div id="tradeParamsBlock" style="padding:8px 12px;background:#0e1219;border-top:1px solid #1f2937">
+      <!-- Amount + Timer Row (compact) -->
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
         <div style="flex:1;display:flex;align-items:center;background:#1f2937;border-radius:6px;padding:4px 8px">
           <input type="number" id="quickAmount" value="100" min="5" step="10" 
-            style="flex:1;background:transparent;border:none;color:#F0B90B;font-size:16px;font-weight:700;font-family:monospace;outline:none;width:60px" />
-          <span style="color:#848E9C;font-size:12px;font-weight:600">USDT</span>
+            style="flex:1;background:transparent;border:none;color:#E040FB;font-size:15px;font-weight:700;font-family:monospace;outline:none;width:50px" />
+          <span style="color:#7B8CA2;font-size:11px;font-weight:600">USDT</span>
         </div>
-      </div>
-      
-      <!-- Timer Selection Row -->
-      <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;overflow-x:auto;scrollbar-width:none">
-        <span style="color:#848E9C;font-size:12px;min-width:50px">${i18n.lang === 'ru' ? 'Время:' : 'Timer:'}</span>
-        <div style="display:flex;gap:4px">
-          <button class="timer-btn" data-dur="30" style="padding:6px 10px;background:#1f2937;border:1px solid transparent;border-radius:4px;color:#9ca3af;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s;font-family:monospace">30с</button>
-          <button class="timer-btn active" data-dur="60" style="padding:6px 10px;background:#F0B90B;border:1px solid #F0B90B;border-radius:4px;color:#0B0E11;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s;font-family:monospace">1м</button>
-          <button class="timer-btn" data-dur="300" style="padding:6px 10px;background:#1f2937;border:1px solid transparent;border-radius:4px;color:#9ca3af;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s;font-family:monospace">5м</button>
-          <button class="timer-btn" data-dur="900" style="padding:6px 10px;background:#1f2937;border:1px solid transparent;border-radius:4px;color:#9ca3af;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s;font-family:monospace">15м</button>
-          <button class="timer-btn" data-dur="1800" style="padding:6px 10px;background:#1f2937;border:1px solid transparent;border-radius:4px;color:#9ca3af;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s;font-family:monospace">30м</button>
+        <div style="display:flex;gap:3px;overflow-x:auto;scrollbar-width:none">
+          <button class="timer-btn" data-dur="30" style="padding:5px 8px;background:#1f2937;border:1px solid transparent;border-radius:4px;color:#9ca3af;font-size:10px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s;font-family:monospace">${t('trade.duration.30s')}</button>
+          <button class="timer-btn active" data-dur="60" style="padding:5px 8px;background:#E040FB;border:1px solid #E040FB;border-radius:4px;color:#0A0E17;font-size:10px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s;font-family:monospace">${t('trade.duration.1m')}</button>
+          <button class="timer-btn" data-dur="300" style="padding:5px 8px;background:#1f2937;border:1px solid transparent;border-radius:4px;color:#9ca3af;font-size:10px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s;font-family:monospace">${t('trade.duration.5m')}</button>
+          <button class="timer-btn" data-dur="900" style="padding:5px 8px;background:#1f2937;border:1px solid transparent;border-radius:4px;color:#9ca3af;font-size:10px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s;font-family:monospace">${t('trade.duration.15m')}</button>
+          <button class="timer-btn" data-dur="1800" style="padding:5px 8px;background:#1f2937;border:1px solid transparent;border-radius:4px;color:#9ca3af;font-size:10px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all 0.2s;font-family:monospace">${t('trade.duration.30m')}</button>
         </div>
       </div>
       
       <!-- Potential Profit Display -->
-      <div id="profitPreview" style="text-align:center;padding:6px 10px;background:rgba(14,203,129,0.1);border:1px solid rgba(14,203,129,0.3);border-radius:6px">
-        <span style="color:#848E9C;font-size:12px">${i18n.lang === 'ru' ? 'Ставка:' : 'Stake:'} </span>
-        <span id="stakeDisplay" style="color:#F0B90B;font-weight:700;font-family:monospace">100 USDT</span>
-        <span style="color:#848E9C;font-size:12px"> → </span>
-        <span style="color:#0ECB81;font-size:13px;font-weight:700">${i18n.lang === 'ru' ? 'Возможная прибыль:' : 'Potential profit:'} </span>
-        <span id="profitDisplay" style="color:#0ECB81;font-weight:700;font-family:monospace">+70 USDT</span>
+      <div id="profitPreview" style="text-align:center;padding:5px 8px;background:rgba(14,203,129,0.1);border:1px solid rgba(14,203,129,0.3);border-radius:6px;font-size:12px">
+        <span style="color:#7B8CA2">${t('trade.stake_label')} </span>
+        <span id="stakeDisplay" style="color:#E040FB;font-weight:700;font-family:monospace">100 USDT</span>
+        <span style="color:#7B8CA2"> → </span>
+        <span style="color:#00E676;font-weight:700">${t('trade.potential_profit')} </span>
+        <span id="profitDisplay" style="color:#00E676;font-weight:700;font-family:monospace">+70 USDT</span>
       </div>
-    </div>
-    
-    <!-- Кнопки купить/продать -->
-    <div style="padding:10px 15px;display:flex;gap:10px">
-      <button class="btn btn-green" id="btnBuy" style="flex:1;font-size:15px;font-weight:700;padding:14px;border-radius:8px;transition:all 0.2s;box-shadow:0 2px 8px rgba(14,203,129,0.3);background:#0ECB81;font-family:monospace">
-        <span id="btnBuyText">${t('trade.buy')}</span>
-        <span id="btnBuyTimer" style="display:none;margin-left:4px"></span>
-      </button>
-      <button class="btn btn-red" id="btnSell" style="flex:1;font-size:15px;font-weight:700;padding:14px;border-radius:8px;transition:all 0.2s;box-shadow:0 2px 8px rgba(246,70,93,0.3);background:#F6465D;font-family:monospace">
-        <span id="btnSellText">${t('trade.sell')}</span>
-        <span id="btnSellTimer" style="display:none;margin-left:4px"></span>
-      </button>
     </div>
     
     <!-- Список сделок -->
-    <div style="padding:0 15px 15px">
-      <div style="font-weight:600;font-size:16px;color:#fff;margin-bottom:12px">${t('trade.list.title')}</div>
-      <div style="display:flex;gap:15px;margin-bottom:10px;border-bottom:1px solid #1f1f1f">
-        <div class="trade-tab active" data-filter="active" style="padding:8px 0;color:#F0B90B;font-weight:600;border-bottom:2px solid #F0B90B;cursor:pointer;font-size:14px">${t('trade.list.active')}</div>
-        <div class="trade-tab" data-filter="closed" style="padding:8px 0;color:#9ca3af;font-weight:600;cursor:pointer;font-size:14px">${t('trade.list.closed')}</div>
-        <div class="trade-tab" data-filter="all" style="padding:8px 0;color:#9ca3af;font-weight:600;cursor:pointer;font-size:14px">${t('trade.list.all')}</div>
+    <div style="padding:0 12px 80px;margin-top:12px">
+      <div style="font-weight:600;font-size:14px;color:#fff;margin-bottom:8px">${t('trade.list.title')}</div>
+      <div style="display:flex;gap:12px;margin-bottom:8px;border-bottom:1px solid #1f1f1f">
+        <div class="trade-tab active" data-filter="active" style="padding:6px 0;color:#E040FB;font-weight:600;border-bottom:2px solid #E040FB;cursor:pointer;font-size:13px">${t('trade.list.active')}</div>
+        <div class="trade-tab" data-filter="closed" style="padding:6px 0;color:#9ca3af;font-weight:600;cursor:pointer;font-size:13px">${t('trade.list.closed')}</div>
+        <div class="trade-tab" data-filter="all" style="padding:6px 0;color:#9ca3af;font-weight:600;cursor:pointer;font-size:13px">${t('trade.list.all')}</div>
       </div>
-      <div id="tradesList" style="max-height:calc(100vh - 520px);overflow-y:auto;overflow-x:hidden"></div>
+      <div id="tradesList" style="max-height:30vh;overflow-y:auto;overflow-x:hidden"></div>
     </div>
   </div>
   
   <!-- Модальное окно для ввода суммы и длительности -->
   <div id="tradeModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);z-index:9999;animation:fadeIn 0.3s">
-    <div id="modalContent" style="position:absolute;bottom:0;left:0;right:0;background:#1a1a1a;border-radius:16px 16px 0 0;padding:20px;animation:slideUp 0.3s;max-height:80vh;overflow-y:auto">
-      <!-- Заголовок -->
-      <div style="text-align:center;margin-bottom:20px">
-        <div style="font-size:14px;color:#9ca3af;margin-bottom:5px" id="modalSubtitle">${t('trade.modal.buying')}</div>
-        <div style="font-size:32px;font-weight:700;color:#fff" id="modalTitle">BTC</div>
-      </div>
-      
-      <!-- Поле ввода суммы -->
-      <div style="margin-bottom:20px">
-        <input type="number" id="modalAmount" placeholder="0" min="5" step="1" 
-          style="width:100%;padding:0;background:transparent;border:none;color:#8b5cf6;font-size:48px;font-weight:700;text-align:center;outline:none" 
-          value="0"/>
-        <div style="text-align:center;font-size:18px;color:#fff;margin-top:5px">${t('common.usdt')}</div>
-      </div>
-      
-      <!-- Доступный баланс -->
-      <div style="text-align:center;margin-bottom:25px">
-        <span style="color:#9ca3af;font-size:14px">${t('trade.modal.available')}: </span>
-        <span style="color:#fff;font-weight:600" id="modalBalance">0 ${t('common.usdt')}</span>
-      </div>
-      
-      <!-- Длительность сделки -->
-      <div style="margin-bottom:25px">
-        <div style="color:#9ca3af;font-size:13px;margin-bottom:10px">${t('trade.modal.duration')}</div>
-        <div id="modalDurationChips" style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center">
-          <div class="chip" data-dur="30" style="padding:12px 20px;font-size:15px">${t('trade.duration.30s')}</div>
-          <div class="chip active" data-dur="60" style="padding:12px 20px;font-size:15px">${t('trade.duration.1m')}</div>
-          <div class="chip" data-dur="300" style="padding:12px 20px;font-size:15px">${t('trade.duration.5m')}</div>
-          <div class="chip" data-dur="900" style="padding:12px 20px;font-size:15px">${t('trade.duration.15m')}</div>
-          <div class="chip" data-dur="1800" style="padding:12px 20px;font-size:15px">${t('trade.duration.30m')}</div>
-          <div class="chip" data-dur="3600" style="padding:12px 20px;font-size:15px">${t('trade.duration.1h')}</div>
+    <div style="position:absolute;bottom:0;left:0;right:0;display:flex;flex-direction:column;max-height:90vh">
+      <div id="modalContent" style="background:#1a1a1a;border-radius:16px 16px 0 0;padding:20px 20px 10px;animation:slideUp 0.3s;overflow-y:auto;flex:1">
+        <div style="text-align:center;margin-bottom:15px">
+          <div style="font-size:13px;color:#9ca3af;margin-bottom:4px" id="modalSubtitle">${t('trade.modal.buying')}</div>
+          <div style="font-size:26px;font-weight:700;color:#fff" id="modalTitle">BTC</div>
+        </div>
+        <div style="margin-bottom:12px">
+          <input type="number" id="modalAmount" placeholder="0" min="5" step="1" 
+            style="width:100%;padding:0;background:transparent;border:none;color:#8b5cf6;font-size:40px;font-weight:700;text-align:center;outline:none" 
+            value="0"/>
+          <div style="text-align:center;font-size:16px;color:#fff;margin-top:2px">${t('common.usdt')}</div>
+        </div>
+        <div style="text-align:center;margin-bottom:15px">
+          <span style="color:#9ca3af;font-size:13px">${t('trade.modal.available')}: </span>
+          <span style="color:#fff;font-weight:600;font-size:13px" id="modalBalance">0 ${t('common.usdt')}</span>
+        </div>
+        <div style="margin-bottom:10px">
+          <div style="color:#9ca3af;font-size:12px;margin-bottom:8px">${t('trade.modal.duration')}</div>
+          <div id="modalDurationChips" style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center">
+            <div class="chip" data-dur="30" style="padding:10px 16px;font-size:14px">${t('trade.duration.30s')}</div>
+            <div class="chip active" data-dur="60" style="padding:10px 16px;font-size:14px">${t('trade.duration.1m')}</div>
+            <div class="chip" data-dur="300" style="padding:10px 16px;font-size:14px">${t('trade.duration.5m')}</div>
+            <div class="chip" data-dur="900" style="padding:10px 16px;font-size:14px">${t('trade.duration.15m')}</div>
+            <div class="chip" data-dur="1800" style="padding:10px 16px;font-size:14px">${t('trade.duration.30m')}</div>
+            <div class="chip" data-dur="3600" style="padding:10px 16px;font-size:14px">${t('trade.duration.1h')}</div>
+          </div>
         </div>
       </div>
-      
-      <!-- Кнопка назад -->
-      <button id="modalBack" style="width:100%;padding:16px;background:#2a2a2a;color:#fff;border:none;border-radius:8px;font-size:16px;font-weight:600;margin-bottom:10px;cursor:pointer">${t('btn.back')}</button>
-      
-      <!-- Кнопка подтверждения -->
-      <button id="modalConfirm" style="width:100%;padding:16px;background:#F0B90B;color:#fff;border:none;border-radius:6px;font-size:16px;font-weight:600;cursor:pointer">${t('trade.buy')}</button>
+      <div style="background:#1a1a1a;padding:10px 20px 20px;display:flex;flex-direction:column;gap:8px;padding-bottom:calc(20px + env(safe-area-inset-bottom, 0px))">
+        <button id="modalConfirm" style="width:100%;padding:14px;background:#E040FB;color:#fff;border:none;border-radius:8px;font-size:16px;font-weight:600;cursor:pointer">${t('trade.buy')}</button>
+        <button id="modalBack" style="width:100%;padding:12px;background:#2a2a2a;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">${t('btn.back')}</button>
+      </div>
     </div>
   </div>
   
@@ -2265,13 +2121,33 @@ async function openPair(pair, displayName = null){
       0%, 100% { box-shadow: 0 0 0 0 rgba(246, 70, 93, 0.7); }
       50% { box-shadow: 0 0 0 8px rgba(246, 70, 93, 0); }
     }
-    .timer-btn:hover { border-color: #F0B90B !important; }
+    .timer-btn:hover { border-color: #E040FB !important; }
   </style>
   `;
   
+  // Create fixed trade buttons in body (outside overflow containers)
+  let tradeFixedEl = document.getElementById('tradeButtonsFixed');
+  if (tradeFixedEl) tradeFixedEl.remove();
+  tradeFixedEl = document.createElement('div');
+  tradeFixedEl.id = 'tradeButtonsFixed';
+  tradeFixedEl.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);width:calc(100% - 24px);max-width:460px;padding:10px 0;display:flex;gap:10px;z-index:200;';
+  tradeFixedEl.innerHTML = `
+    <button class="btn btn-green" id="btnBuy" style="flex:1;font-size:15px;font-weight:700;padding:14px;border-radius:10px;box-shadow:0 4px 12px rgba(0,230,118,0.4);background:#00E676;color:#0A0E17;font-family:monospace;border:none;cursor:pointer">
+      <span id="btnBuyText">${t('trade.buy')}</span>
+      <span id="btnBuyTimer" style="display:none;margin-left:4px"></span>
+    </button>
+    <button class="btn btn-red" id="btnSell" style="flex:1;font-size:15px;font-weight:700;padding:14px;border-radius:10px;box-shadow:0 4px 12px rgba(255,82,82,0.4);background:#FF5252;color:#fff;font-family:monospace;border:none;cursor:pointer">
+      <span id="btnSellText">${t('trade.sell')}</span>
+      <span id="btnSellTimer" style="display:none;margin-left:4px"></span>
+    </button>
+  `;
+  document.body.appendChild(tradeFixedEl);
+
   // Обработчик кнопки назад
   document.getElementById('backTrade').onclick = () => {
-    renderTrade(); // Will restore header automatically
+    const el = document.getElementById('tradeButtonsFixed');
+    if (el) el.remove();
+    renderTrade();
   };
   
   const sym=pair.replace('/','');
@@ -2310,7 +2186,7 @@ async function openPair(pair, displayName = null){
     try {
       const res = await apiFetch('/api/user');
       const user = await res.json();
-      modalBalance.textContent = `${parseFloat(user.balance_usdt || 0).toFixed(2)} ${t('common.usdt')}`;
+      modalBalance.textContent = `${fmtNum(user.balance_usdt || 0, 2)} ${t('common.usdt')}`;
     } catch (e) {
       console.error('Failed to load balance:', e);
     }
@@ -2325,12 +2201,12 @@ async function openPair(pair, displayName = null){
       modalSubtitle.textContent = t('trade.modal.buying');
       modalTitle.textContent = coinName;
       modalConfirm.textContent = t('trade.buy');
-      modalConfirm.style.background = '#0ECB81';
+      modalConfirm.style.background = '#00E676';
     } else {
       modalSubtitle.textContent = t('trade.modal.selling');
       modalTitle.textContent = coinName;
       modalConfirm.textContent = t('trade.sell');
-      modalConfirm.style.background = '#F6465D';
+      modalConfirm.style.background = '#FF5252';
     }
     
     // Use amount from quick input
@@ -2339,6 +2215,10 @@ async function openPair(pair, displayName = null){
     
     loadUserBalance();
     tradeModal.style.display = 'block';
+    const tf = document.getElementById('tradeButtonsFixed');
+    if(tf) tf.style.display = 'none';
+    const nb = document.querySelector('.navbar');
+    if(nb) nb.style.display = 'none';
     
     // Focus on amount input
     setTimeout(() => modalAmount.focus(), 300);
@@ -2347,6 +2227,10 @@ async function openPair(pair, displayName = null){
   // Close modal
   function closeTradeModal() {
     tradeModal.style.display = 'none';
+    const tf = document.getElementById('tradeButtonsFixed');
+    if(tf) tf.style.display = 'flex';
+    const nb = document.querySelector('.navbar');
+    if(nb) nb.style.display = '';
   }
   
   // Modal duration chips logic
@@ -2368,9 +2252,9 @@ async function openPair(pair, displayName = null){
         b.style.color = '#9ca3af';
         b.classList.remove('active');
       });
-      btn.style.background = '#F0B90B';
-      btn.style.border = '1px solid #F0B90B';
-      btn.style.color = '#0B0E11';
+      btn.style.background = '#E040FB';
+      btn.style.border = '1px solid #E040FB';
+      btn.style.color = '#0A0E17';
       btn.classList.add('active');
       selectedDuration = parseInt(btn.getAttribute('data-dur'));
       
@@ -2392,9 +2276,9 @@ async function openPair(pair, displayName = null){
   
   function updateProfitDisplay() {
     const amount = parseFloat(quickAmountInput.value) || 0;
-    stakeDisplay.textContent = amount + ' USDT';
+    stakeDisplay.textContent = fmtNum(amount, 0) + ' USDT';
     const profit = amount * PAYOUT_RATE;
-    profitDisplay.textContent = '+' + profit.toFixed(2) + ' USDT';
+    profitDisplay.textContent = '+' + fmtNum(profit, 2) + ' USDT';
   }
   
   quickAmountInput.oninput = updateProfitDisplay;
@@ -2439,24 +2323,24 @@ async function openPair(pair, displayName = null){
           btnBuyText.textContent = t('trade.buy');
           btnBuyTimer.textContent = timerText;
           btnBuyTimer.style.display = 'inline';
-          btnBuy.style.background = 'linear-gradient(135deg, #0ECB81, #0BA069)';
+          btnBuy.style.background = 'linear-gradient(135deg, #00E676, #0BA069)';
           btnBuy.style.animation = 'pulse-green 1.5s infinite';
           
           btnSellText.textContent = t('trade.sell');
           btnSellTimer.style.display = 'none';
-          btnSell.style.background = '#F6465D';
+          btnSell.style.background = '#FF5252';
           btnSell.style.animation = 'none';
           btnSell.style.opacity = '0.5';
         } else {
           btnSellText.textContent = t('trade.sell');
           btnSellTimer.textContent = timerText;
           btnSellTimer.style.display = 'inline';
-          btnSell.style.background = 'linear-gradient(135deg, #F6465D, #D43850)';
+          btnSell.style.background = 'linear-gradient(135deg, #FF5252, #D43850)';
           btnSell.style.animation = 'pulse-red 1.5s infinite';
           
           btnBuyText.textContent = t('trade.buy');
           btnBuyTimer.style.display = 'none';
-          btnBuy.style.background = '#0ECB81';
+          btnBuy.style.background = '#00E676';
           btnBuy.style.animation = 'none';
           btnBuy.style.opacity = '0.5';
         }
@@ -2464,13 +2348,13 @@ async function openPair(pair, displayName = null){
         activeTradeForPair = null;
         btnBuyText.textContent = t('trade.buy');
         btnBuyTimer.style.display = 'none';
-        btnBuy.style.background = '#0ECB81';
+        btnBuy.style.background = '#00E676';
         btnBuy.style.animation = 'none';
         btnBuy.style.opacity = '1';
         
         btnSellText.textContent = t('trade.sell');
         btnSellTimer.style.display = 'none';
-        btnSell.style.background = '#F6465D';
+        btnSell.style.background = '#FF5252';
         btnSell.style.animation = 'none';
         btnSell.style.opacity = '1';
       }
@@ -2520,17 +2404,19 @@ async function openPair(pair, displayName = null){
       borderColor: '#2a2a2a',
       timeVisible: true,
       secondsVisible: false,
+      rightOffset: 5,
+      shiftVisibleRangeOnNewBar: true,
     },
   });
 
   // Create candlestick series
   const candleSeries = chart.addCandlestickSeries({
-    upColor: '#0ECB81',
-    downColor: '#F6465D',
-    borderUpColor: '#0ECB81',
-    borderDownColor: '#F6465D',
-    wickUpColor: '#0ECB81',
-    wickDownColor: '#F6465D',
+    upColor: '#00E676',
+    downColor: '#FF5252',
+    borderUpColor: '#00E676',
+    borderDownColor: '#FF5252',
+    wickUpColor: '#00E676',
+    wickDownColor: '#FF5252',
   });
 
   let entryPriceLines = [];
@@ -2553,7 +2439,7 @@ async function openPair(pair, displayName = null){
       const candles = await res.json();
       
       if (!candles || candles.length === 0) {
-        chartContainer.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#9ca3af">Нет данных</div>';
+        chartContainer.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#9ca3af">${t('trade.no_data')}</div>`;
         return;
       }
 
@@ -2567,6 +2453,9 @@ async function openPair(pair, displayName = null){
       }));
 
       candleSeries.setData(candleData);
+      if (candleData.length > 0) {
+        lastCandleData = { ...candleData[candleData.length - 1] };
+      }
 
       const candleTimes = candleData.map(c => c.time).sort((a, b) => a - b);
 
@@ -2599,13 +2488,13 @@ async function openPair(pair, displayName = null){
         const markers = tradesForPair.map(t => {
           const rawTime = parseUTC(t.entry_time);
           const snappedTime = snapToCandle(rawTime);
-          const color = t.side === 'buy' ? '#0ECB81' : '#F6465D';
+          const color = t.side === 'buy' ? '#00E676' : '#FF5252';
           return {
             time: snappedTime,
             position: t.side === 'buy' ? 'belowBar' : 'aboveBar',
             color: color,
             shape: t.side === 'buy' ? 'arrowUp' : 'arrowDown',
-            text: `${t.amount_usdt} USDT`,
+            text: `${fmtNum(t.amount_usdt, 0)} USDT`,
           };
         });
 
@@ -2617,9 +2506,9 @@ async function openPair(pair, displayName = null){
         tradesForPair.forEach(t => {
           const entryPrice = parseFloat(t.entry_price || t.start_price);
           if (!entryPrice) return;
-          const lineColor = t.side === 'buy' ? '#0ECB81' : '#F6465D';
+          const lineColor = t.side === 'buy' ? '#00E676' : '#FF5252';
           const arrow = t.side === 'buy' ? '▲' : '▼';
-          const labelText = `${arrow} ${t.amount_usdt} USDT @ $${entryPrice.toLocaleString('en-US', {maximumFractionDigits: 2})}`;
+          const labelText = `${arrow} ${fmtNum(t.amount_usdt, 0)} USDT @ $${fmtNum(entryPrice, 2)}`;
           const priceLine = candleSeries.createPriceLine({
             price: entryPrice,
             color: lineColor,
@@ -2637,14 +2526,18 @@ async function openPair(pair, displayName = null){
           if (closedRes.ok) {
             const closedData = await closedRes.json();
             const closedTrades = closedData.trades || [];
-            const closedForPair = closedTrades.filter(ct =>
-              ct.pair.replace('-', '').replace('/', '') === pairNormalized
-            );
+            const nowSec = Math.floor(Date.now() / 1000);
+            const MARKER_TTL = 300;
+            const closedForPair = closedTrades.filter(ct => {
+              if (ct.pair.replace('-', '').replace('/', '') !== pairNormalized) return false;
+              const closedAt = parseUTC(ct.closed_at || ct.opened_at);
+              return (nowSec - closedAt) < MARKER_TTL;
+            });
             closedMarkers = closedForPair.map(ct => {
               const rawClose = parseUTC(ct.closed_at || ct.opened_at);
               const snappedClose = snapToCandle(rawClose);
               const isWin = ct.result === 'win';
-              const color = isWin ? '#0ECB81' : '#F6465D';
+              const color = isWin ? '#00E676' : '#FF5252';
               const sign = isWin ? '+' : '-';
               const amount = isWin ? (ct.payout || 0) : (ct.amount_usdt || 0);
               const label = isWin ? 'WIN' : 'LOSS';
@@ -2653,7 +2546,7 @@ async function openPair(pair, displayName = null){
                 position: isWin ? 'aboveBar' : 'belowBar',
                 color: color,
                 shape: 'circle',
-                text: `${label} ${sign}${Math.abs(amount).toFixed(0)}`,
+                text: `${label} ${sign}${fmtNum(Math.abs(amount), 0)}`,
               };
             });
           }
@@ -2688,13 +2581,151 @@ async function openPair(pair, displayName = null){
   window._loadChartData = loadChartData;
 
   loadChartData();
-  const chartRefreshTimer = setInterval(loadChartData, 3000);
+  const chartRefreshTimer = setInterval(loadChartData, 5000);
+
+  let lastCandleData = null;
+  let realPrice = 0;
+  let priceOffset = 0;
+  let returningToReal = false;
+  let localTimeLeftSec = null;
+  let lastTradeUpdateTime = 0;
+
+  let candleIntervalSec = selectedTimeframe * 60;
+
+  function getCandleStartTime(unixSec) {
+    return Math.floor(unixSec / candleIntervalSec) * candleIntervalSec;
+  }
+
+  const tickTimer = setInterval(async () => {
+    try {
+      const res = await apiFetch(`/api/prices`);
+      const prices = await res.json();
+      const symKey = sym.replace('USDT','').toUpperCase();
+      const priceData = prices[symKey];
+      if (!priceData) return;
+      const currentPrice = typeof priceData === 'object' ? priceData.price : priceData;
+      if (!currentPrice || currentPrice <= 0) return;
+      realPrice = currentPrice;
+
+      if (activeTradeForPair && localTimeLeftSec === null) {
+        localTimeLeftSec = activeTradeForPair.time_left_sec || 0;
+        lastTradeUpdateTime = Date.now();
+      }
+
+      if (activeTradeForPair && localTimeLeftSec > 0) {
+        const now = Date.now();
+        const elapsed_ms = now - lastTradeUpdateTime;
+        lastTradeUpdateTime = now;
+        localTimeLeftSec = Math.max(0, localTimeLeftSec - elapsed_ms / 1000);
+
+        const totalDuration = activeTradeForPair.duration_sec || 60;
+        const elapsed = totalDuration - localTimeLeftSec;
+        const progress = Math.min(elapsed / totalDuration, 1);
+
+        const serverTrend = activeTradeForPair._t || 1;
+        const sideDir = activeTradeForPair.side === 'buy' ? 1 : -1;
+        const direction = sideDir * serverTrend;
+
+        const isLongTrade = totalDuration >= 120;
+        const baseVolatility = currentPrice * 0.0003;
+
+        let easeProgress, maxShift, smoothing, noiseAmp;
+
+        if (isLongTrade) {
+          if (progress < 0.6) {
+            easeProgress = progress * 0.05;
+            maxShift = currentPrice * 0.0003;
+            smoothing = 0.95;
+            noiseAmp = 1.5;
+          } else if (progress < 0.85) {
+            const p = (progress - 0.6) / 0.25;
+            easeProgress = 0.03 + p * p * 0.4;
+            maxShift = currentPrice * (0.0004 + p * 0.0006);
+            smoothing = 0.88;
+            noiseAmp = 1.0;
+          } else {
+            const p = (progress - 0.85) / 0.15;
+            easeProgress = 0.43 + p * p * 0.57;
+            maxShift = currentPrice * (0.0008 + p * 0.0008);
+            smoothing = 0.78;
+            noiseAmp = 0.5;
+          }
+        } else {
+          if (progress < 0.4) {
+            easeProgress = progress * 0.15;
+            maxShift = currentPrice * 0.0004;
+            smoothing = 0.92;
+            noiseAmp = 1.3;
+          } else if (progress < 0.75) {
+            const p = (progress - 0.4) / 0.35;
+            easeProgress = 0.06 + p * 0.45;
+            maxShift = currentPrice * (0.0005 + p * 0.0007);
+            smoothing = 0.85;
+            noiseAmp = 0.9;
+          } else {
+            const p = (progress - 0.75) / 0.25;
+            easeProgress = 0.51 + p * p * 0.49;
+            maxShift = currentPrice * (0.0008 + p * 0.0006);
+            smoothing = 0.78;
+            noiseAmp = 0.4;
+          }
+        }
+        
+        const targetOffset = direction * maxShift * Math.min(easeProgress, 1);
+        const noise = (Math.random() - 0.5) * baseVolatility * noiseAmp;
+        priceOffset = priceOffset * smoothing + (targetOffset + noise) * (1 - smoothing);
+        returningToReal = false;
+      } else {
+        if (!activeTradeForPair) {
+          localTimeLeftSec = null;
+        }
+        if (priceOffset !== 0) {
+          returningToReal = true;
+          priceOffset *= 0.85;
+          if (Math.abs(priceOffset) < currentPrice * 0.00003) {
+            priceOffset = 0;
+            returningToReal = false;
+          }
+        }
+      }
+
+      const displayPrice = currentPrice + priceOffset;
+
+      const nowSec = Math.floor(Date.now() / 1000);
+      const currentCandleStart = getCandleStartTime(nowSec);
+
+      if (lastCandleData) {
+        if (currentCandleStart > lastCandleData.time) {
+          lastCandleData = {
+            time: currentCandleStart,
+            open: displayPrice,
+            high: displayPrice,
+            low: displayPrice,
+            close: displayPrice,
+          };
+          candleSeries.update(lastCandleData);
+          chart.timeScale().scrollToPosition(2, false);
+        } else {
+          lastCandleData.high = Math.max(lastCandleData.high, displayPrice);
+          lastCandleData.low = Math.min(lastCandleData.low, displayPrice);
+          lastCandleData.close = displayPrice;
+          candleSeries.update({
+            time: lastCandleData.time,
+            open: lastCandleData.open,
+            high: lastCandleData.high,
+            low: lastCandleData.low,
+            close: lastCandleData.close,
+          });
+        }
+      }
+    } catch(e) {}
+  }, 1000);
   
   // Timeframe buttons handler
   document.querySelectorAll('.tf-btn').forEach(btn => {
     btn.onclick = () => {
-      // Update selected timeframe
       selectedTimeframe = parseInt(btn.getAttribute('data-tf'));
+      candleIntervalSec = selectedTimeframe * 60;
       
       // Update button styles
       document.querySelectorAll('.tf-btn').forEach(b => {
@@ -2772,7 +2803,7 @@ async function openPair(pair, displayName = null){
       listDiv.innerHTML = filtered.map(trade => {
         const isBuy = trade.side === 'buy';
         const sideText = isBuy ? t('trade.side.buy') : t('trade.side.sell');
-        const sideColor = isBuy ? '#0ECB81' : '#F6465D';
+        const sideColor = isBuy ? '#00E676' : '#FF5252';
         const sideIcon = isBuy ? '↑' : '↓';
         const isActive = trade.is_active || trade.status === 'active';
         
@@ -2796,30 +2827,30 @@ async function openPair(pair, displayName = null){
           
           // Calculate progress percentage (remaining time)
           const progressPercent = Math.max(0, Math.min(100, (timeLeft / totalDuration) * 100));
-          const progressColor = timeLeft <= 10 ? '#0ECB81' : '#F0B90B';
-          resultColor = timeLeft <= 10 ? '#0ECB81' : '#F0B90B';
+          const progressColor = timeLeft <= 10 ? '#00E676' : '#E040FB';
+          resultColor = timeLeft <= 10 ? '#00E676' : '#E040FB';
           
           statusBadge = `<span style="background:${resultColor}20;color:${resultColor};padding:3px 8px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:0.5px">${t('trade.status.active')}</span>`;
           
           // Progress bar HTML
           progressBarHtml = `
             <div style="margin-top:6px;width:100%">
-              <div style="background:#2B3139;border-radius:2px;height:4px;overflow:hidden">
+              <div style="background:rgba(255,255,255,0.08);border-radius:2px;height:4px;overflow:hidden">
                 <div style="background:${progressColor};height:100%;width:${progressPercent}%;border-radius:2px;transition:width 1s linear,background 0.3s"></div>
               </div>
             </div>`;
         } else if (trade.result === 'win') {
           const profit = trade.payout || trade.amount_usdt * 0.8;
-          resultText = `+${profit.toFixed(0)} USDT`;
-          resultColor = '#0ECB81';
-          statusBadge = `<span style="background:#0ECB8130;color:#0ECB81;padding:4px 10px;border-radius:4px;font-size:12px;font-weight:700;letter-spacing:0.5px">${t('trade.status.win')}</span>`;
+          resultText = `+${fmtNum(profit, 0)} USDT`;
+          resultColor = '#00E676';
+          statusBadge = `<span style="background:#00E67630;color:#00E676;padding:4px 10px;border-radius:4px;font-size:12px;font-weight:700;letter-spacing:0.5px">${t('trade.status.win')}</span>`;
         } else if (trade.result === 'loss') {
-          resultText = `-${(trade.amount_usdt || 0).toFixed(0)} USDT`;
-          resultColor = '#F6465D';
-          statusBadge = `<span style="background:#F6465D30;color:#F6465D;padding:4px 10px;border-radius:4px;font-size:12px;font-weight:700;letter-spacing:0.5px">${t('trade.status.loss')}</span>`;
+          resultText = `-${fmtNum(trade.amount_usdt || 0, 0)} USDT`;
+          resultColor = '#FF5252';
+          statusBadge = `<span style="background:#FF525230;color:#FF5252;padding:4px 10px;border-radius:4px;font-size:12px;font-weight:700;letter-spacing:0.5px">${t('trade.status.loss')}</span>`;
         } else {
-          resultText = `-${(trade.amount_usdt || 0).toFixed(0)} USDT`;
-          resultColor = '#F6465D';
+          resultText = `-${fmtNum(trade.amount_usdt || 0, 0)} USDT`;
+          resultColor = '#FF5252';
         }
         
         const tradeDate = new Date(trade.opened_at);
@@ -2837,18 +2868,18 @@ async function openPair(pair, displayName = null){
                       <span style="font-weight:700;font-size:15px;color:#fff">${trade.pair}</span>
                       <span style="font-size:14px;color:${sideColor}">${sideIcon}</span>
                     </div>
-                    <div style="font-size:11px;color:#848E9C">${t('trade.position_opened')}</div>
+                    <div style="font-size:11px;color:#7B8CA2">${t('trade.position_opened')}</div>
                   </div>
                   ${statusBadge}
                 </div>
                 <div style="display:flex;justify-content:space-between;align-items:center">
                   <div>
                     <div style="font-size:12px;color:${sideColor};font-weight:600;margin-bottom:2px">${sideText}</div>
-                    <div style="font-size:13px;color:#EAECEF;font-family:monospace">${trade.amount_usdt} USDT @ ${openPriceNum}</div>
+                    <div style="font-size:13px;color:#EAECEF;font-family:monospace">${fmtNum(trade.amount_usdt, 0)} USDT @ ${openPriceNum}</div>
                   </div>
                   <div style="text-align:right">
                     <div style="font-weight:700;font-size:20px;color:${resultColor};font-family:monospace">${resultText}</div>
-                    <div style="font-size:10px;color:#848E9C;margin-top:2px">${timeStr}</div>
+                    <div style="font-size:10px;color:#7B8CA2;margin-top:2px">${timeStr}</div>
                   </div>
                 </div>
                 ${progressBarHtml}
@@ -2867,22 +2898,22 @@ async function openPair(pair, displayName = null){
                     <span style="font-weight:700;font-size:15px;color:#fff">${trade.pair}</span>
                     <span style="font-size:14px;color:${sideColor}">${sideIcon}</span>
                   </div>
-                  <div style="font-size:11px;color:#848E9C">${t('trade.position_closed')}</div>
+                  <div style="font-size:11px;color:#7B8CA2">${t('trade.position_closed')}</div>
                 </div>
                 ${statusBadge}
               </div>
               <div style="display:flex;justify-content:space-between;align-items:flex-end">
                 <div>
-                  <div style="font-size:12px;color:${sideColor};font-weight:600;margin-bottom:4px">${sideText} • ${trade.amount_usdt} USDT</div>
+                  <div style="font-size:12px;color:${sideColor};font-weight:600;margin-bottom:4px">${sideText} • ${fmtNum(trade.amount_usdt, 0)} USDT</div>
                   <div style="display:flex;align-items:center;gap:6px">
                     <span style="font-size:14px;color:#EAECEF;font-family:monospace;font-weight:500">${openPriceNum}</span>
-                    <span style="font-size:12px;color:#848E9C">→</span>
+                    <span style="font-size:12px;color:#7B8CA2">→</span>
                     <span style="font-size:14px;color:${resultColor};font-family:monospace;font-weight:500">${closePriceNum}</span>
                   </div>
                 </div>
                 <div style="text-align:right">
                   <div style="font-weight:700;font-size:22px;color:${resultColor};font-family:monospace">${resultText}</div>
-                  <div style="font-size:10px;color:#848E9C;margin-top:2px">${timeStr}</div>
+                  <div style="font-size:10px;color:#7B8CA2;margin-top:2px">${timeStr}</div>
                 </div>
               </div>
             </div>
@@ -2893,28 +2924,27 @@ async function openPair(pair, displayName = null){
     } catch (e) {
       console.error('Failed to load trades:', e);
       const errDiv = document.getElementById('tradesList');
-      if (errDiv) errDiv.innerHTML = '<div style="text-align:center;color:#ef4444;padding:20px">Ошибка загрузки</div>';
+      if (errDiv) errDiv.innerHTML = '<div style="text-align:center;color:#ef4444;padding:20px">' + t('common.loading_error') + '</div>';
     }
   }
   
   // Initial load
   loadTradesList('active', pair);
   
-  // Auto-refresh trades list every second for smooth timer countdown
-  setInterval(() => loadTradesList(currentFilter, pair), 1000);
+  setInterval(() => loadTradesList(currentFilter, pair), 3000);
 }
 async function placeOrder(pair, side, duration, amount){
   const amt = amount || 0;
   const dur = duration || 60;
-  if(amt<5){ toast('Мин. ставка 5 USDT'); return; }
+  if(amt<5){ toast(t('trade.min_stake')); return; }
   try{
     const res=await apiFetch('/api/trade/order',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ pair, side, amount_usdt: amt, duration_sec: dur }) });
     const data=await res.json();
     if(!data.ok){ toast(data.error||t('toast.error')); return; }
     if (typeof window._loadChartData === 'function') window._loadChartData();
-    const direction = side === 'buy' ? '⬆️ ВВЕРХ' : '⬇️ ВНИЗ';
-    const orderFilledText = i18n.lang === 'ru' ? 'Ордер исполнен' : 'Order filled';
-    toast(`${orderFilledText}: ${direction} ${dur >= 60 ? Math.floor(dur/60) + (i18n.lang === 'ru' ? ' мин' : ' min') : dur + (i18n.lang === 'ru' ? ' сек' : ' sec')}`);
+    const direction = side === 'buy' ? '⬆️ ' + t('trade.up') : '⬇️ ' + t('trade.down');
+    const orderFilledText = t('trade.order_filled');
+    toast(`${orderFilledText}: ${direction} ${dur >= 60 ? Math.floor(dur/60) + (' ' + t('trade.min_unit')) : dur + (' ' + t('trade.sec_unit'))}`);
     const id=data.order_id;
     let hasShownResult = false;
     const intv=setInterval(async ()=>{
@@ -2951,7 +2981,7 @@ async function renderReferrals(){
   let ref = { referral_code:'', referral_count:0, referral_earnings:0, referrals:[] };
   try{ ref = await (await apiFetch('/api/referrals')).json(); }catch(e){ console.error('referrals failed', e); }
   
-  const botUsername = 'KrakenTopBot';
+  const botUsername = 'Cryptexa_rubot';
   const refLink = `https://t.me/${botUsername}?start=${ref.referral_code}`;
   
   cont.innerHTML = `
@@ -2959,7 +2989,7 @@ async function renderReferrals(){
     <div class="section">
       <div class="section-header"><div class="section-title">${t('referrals.title')}</div></div>
       <div class="section-content">
-        <p style="color:#848E9C; font-size:14px; margin-bottom:16px;">${t('referrals.invite')}</p>
+        <p style="color:#7B8CA2; font-size:14px; margin-bottom:16px;">${t('referrals.invite')}</p>
         
         <div class="balance-card" style="margin-bottom:16px;">
           <div class="small">${t('referrals.your_link')}</div>
@@ -2976,12 +3006,12 @@ async function renderReferrals(){
           </div>
           <div class="balance-card">
             <div class="small">${t('referrals.earnings')}</div>
-            <div class="balance-amount">${Number(ref.referral_earnings||0).toFixed(2)} <span class="currency">USDT</span></div>
+            <div class="balance-amount">${fmtNum(ref.referral_earnings||0, 2)} <span class="currency">USDT</span></div>
           </div>
         </div>
         
-        <div class="info-box" style="background:#1A1A2E; border:1px solid #F0B90B; border-radius:6px; padding:12px; margin-bottom:16px;">
-          <span style="color:#F0B90B;">💰</span> <span style="color:#848E9C;">${t('referrals.bonus')}</span>
+        <div class="info-box" style="background:#1A1A2E; border:1px solid #E040FB; border-radius:6px; padding:12px; margin-bottom:16px;">
+          <span style="color:#E040FB;">💰</span> <span style="color:#7B8CA2;">${t('referrals.bonus')}</span>
         </div>
       </div>
     </div>
@@ -2990,7 +3020,7 @@ async function renderReferrals(){
       <div class="section-header"><div class="section-title">${t('referrals.list')}</div></div>
       <div class="section-content" id="refList">
         ${ref.referrals.length === 0 ? 
-          `<p style="color:#848E9C; text-align:center; padding:20px;">${t('referrals.empty')}</p>` : 
+          `<p style="color:#7B8CA2; text-align:center; padding:20px;">${t('referrals.empty')}</p>` : 
           ref.referrals.map(r => `
             <div class="history-row">
               <div class="history-info">
@@ -3029,27 +3059,27 @@ async function openSupport(){
     <div class="chat-input-container">
       <label for="file" class="btn-attach">+</label>
       <input type="file" id="file" accept="image/*" style="display:none"/>
-      <input type="text" id="msg" class="chat-input" placeholder="Введите сообщение..."/>
+      <input type="text" id="msg" class="chat-input" placeholder="${t('support.enter_message')}"/>
       <button class="btn-send" id="send">→</button>
     </div>
   </div>`;
   document.getElementById('backAssets').onclick = renderAssets;
   
   async function deleteMessage(messageId) {
-    if (!window.confirm('Вы уверены, что хотите удалить это сообщение?')) {
+    if (!window.confirm(t('support.confirm_delete'))) {
       return;
     }
     try {
       const res = await apiFetch(`/api/support/${messageId}`, { method: 'DELETE' });
       if (res.ok) {
-        toast('Сообщение удалено');
+        toast(t('support.message_deleted'));
         await load();
       } else {
-        toast('Ошибка удаления');
+        toast(t('common.delete_error'));
       }
     } catch(e) {
       console.error('Delete failed', e);
-      toast('Ошибка удаления');
+      toast(t('common.delete_error'));
     }
   }
   
@@ -3057,7 +3087,6 @@ async function openSupport(){
     try{ 
       // Load regular support messages
       const data=await (await apiFetch('/api/support')).json(); 
-      const isAdmin = data.is_admin || false;
       const msgs = data.messages || [];
       
       // Load admin broadcast and personal messages
@@ -3071,15 +3100,15 @@ async function openSupport(){
       if (adminMsgs.length > 0) {
         const adminSection = document.createElement('div');
         adminSection.style.marginBottom = '20px';
-        adminSection.innerHTML = '<div class="msg-label" style="text-align:center; margin: 10px 0; color: #8b5cf6; font-weight: bold;">📢 Сообщения от администратора</div>';
+        adminSection.innerHTML = `<div class="msg-label" style="text-align:center; margin: 10px 0; color: #8b5cf6; font-weight: bold;">${t('support.admin_msgs')}</div>`;
         chat.appendChild(adminSection);
         
         adminMsgs.forEach(m => {
           const d = document.createElement('div');
           d.className = 'msg admin';
           d.style.position = 'relative';
-          const broadcastLabel = m.is_broadcast ? ' (Всем пользователям)' : '';
-          d.innerHTML = `<div class="msg-label">Администратор${broadcastLabel}</div><div class="msg-text">${m.message_text}</div><div class="msg-time" style="font-size: 10px; color: #999; margin-top: 4px;">${new Date(m.created_at).toLocaleString()}</div>`;
+          const broadcastLabel = m.is_broadcast ? ' (' + t('support.broadcast_all') + ')' : '';
+          d.innerHTML = `<div class="msg-label">${t('support.admin_label')}${broadcastLabel}</div><div class="msg-text">${m.message_text}</div><div class="msg-time" style="font-size: 10px; color: #999; margin-top: 4px;">${new Date(m.created_at).toLocaleString()}</div>`;
           chat.appendChild(d);
         });
         
@@ -3088,7 +3117,7 @@ async function openSupport(){
           const separator = document.createElement('div');
           separator.style.margin = '20px 0';
           separator.style.borderTop = '1px solid #444';
-          separator.innerHTML = '<div class="msg-label" style="text-align:center; margin: 10px 0; color: #8b5cf6; font-weight: bold;">💬 Чат с поддержкой</div>';
+          separator.innerHTML = `<div class="msg-label" style="text-align:center; margin: 10px 0; color: #8b5cf6; font-weight: bold;">${t('support.chat_with_support')}</div>`;
           chat.appendChild(separator);
         }
       }
@@ -3098,10 +3127,10 @@ async function openSupport(){
         const d=document.createElement('div'); 
         d.className='msg '+(m.sender==='user'?'user':'admin');
         d.style.position = 'relative';
-        const label = m.sender==='user' ? 'Вы' : 'Поддержка';
-        const content = m.text || (m.file_path?'[Фото]':'');
+        const label = m.sender==='user' ? t('support.you') : t('support.support_label');
+        const content = m.text || (m.file_path?t('support.photo_label'):'');
         
-        const showDeleteBtn = isAdmin || m.sender === 'user';
+        const showDeleteBtn = m.sender === 'user';
         const deleteBtn = showDeleteBtn ? `<button class="msg-delete" data-id="${m.id}">×</button>` : '';
         
         d.innerHTML = `<div class="msg-label">${label}</div><div class="msg-text">${content}</div>${deleteBtn}`;
@@ -3150,27 +3179,27 @@ function openCreateCheckModal() {
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
   
   modal.innerHTML = `
-    <div style="background:#1E2329;border-radius:16px;width:100%;max-width:360px;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,0.5)">
+    <div style="background:#131A2A;border-radius:16px;width:100%;max-width:360px;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,0.5)">
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
-        <div style="width:48px;height:48px;background:linear-gradient(135deg,#F0B90B,#D4A10A);border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:24px">🎁</div>
+        <div style="width:48px;height:48px;background:linear-gradient(135deg,#E040FB,#D4A10A);border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:24px">🎁</div>
         <div>
-          <div style="color:#EAECEF;font-size:18px;font-weight:600">${lang === 'ru' ? 'Создать чек' : 'Create Check'}</div>
-          <div style="color:#848E9C;font-size:12px">${lang === 'ru' ? 'Подарите USDT другу' : 'Gift USDT to a friend'}</div>
+          <div style="color:#EAECEF;font-size:18px;font-weight:600">${t('gift.create_title')}</div>
+          <div style="color:#7B8CA2;font-size:12px">${t('gift.gift_usdt')}</div>
         </div>
       </div>
       
       <div style="margin-bottom:16px">
-        <label style="color:#848E9C;font-size:12px;display:block;margin-bottom:6px">${lang === 'ru' ? 'Сумма USDT' : 'Amount USDT'}</label>
+        <label style="color:#7B8CA2;font-size:12px;display:block;margin-bottom:6px">${t('gift.amount_usdt')}</label>
         <input type="number" id="checkAmountInput" placeholder="10" min="1" step="0.01" 
-          style="width:100%;padding:14px;background:#0B0E11;border:1px solid #2B3139;border-radius:8px;color:#EAECEF;font-size:16px;outline:none;box-sizing:border-box" />
+          style="width:100%;padding:14px;background:#0A0E17;border:1px solid rgba(255,255,255,0.08);border-radius:8px;color:#EAECEF;font-size:16px;outline:none;box-sizing:border-box" />
       </div>
       
       <div style="display:flex;gap:10px;margin-top:20px">
-        <button id="checkCancelBtn" style="flex:1;padding:14px;background:#2B3139;color:#848E9C;font-size:14px;font-weight:500;border:none;border-radius:8px;cursor:pointer">
-          ${lang === 'ru' ? 'Отмена' : 'Cancel'}
+        <button id="checkCancelBtn" style="flex:1;padding:14px;background:rgba(255,255,255,0.08);color:#7B8CA2;font-size:14px;font-weight:500;border:none;border-radius:8px;cursor:pointer">
+          ${t('btn.cancel')}
         </button>
-        <button id="checkCreateBtn" style="flex:1;padding:14px;background:linear-gradient(135deg,#F0B90B,#D4A10A);color:#0B0E11;font-size:14px;font-weight:600;border:none;border-radius:8px;cursor:pointer">
-          ${lang === 'ru' ? 'Создать' : 'Create'}
+        <button id="checkCreateBtn" style="flex:1;padding:14px;background:linear-gradient(135deg,#E040FB,#D4A10A);color:#0A0E17;font-size:14px;font-weight:600;border:none;border-radius:8px;cursor:pointer">
+          ${t('gift.btn_create')}
         </button>
       </div>
     </div>
@@ -3187,13 +3216,13 @@ function openCreateCheckModal() {
   document.getElementById('checkCreateBtn').onclick = async () => {
     const amount = parseFloat(input.value);
     if (!amount || amount < 1) {
-      toast(lang === 'ru' ? '❌ Минимум 1 USDT' : '❌ Minimum 1 USDT');
+      toast(t('gift.min_1_usdt'));
       return;
     }
     
     const btn = document.getElementById('checkCreateBtn');
     btn.disabled = true;
-    btn.textContent = lang === 'ru' ? 'Создание...' : 'Creating...';
+    btn.textContent = t('common.creating');
     
     try {
       const r = await apiFetch('/api/checks/create', {
@@ -3211,12 +3240,12 @@ function openCreateCheckModal() {
       } else {
         toast('❌ ' + (d.error || 'Error'));
         btn.disabled = false;
-        btn.textContent = lang === 'ru' ? 'Создать' : 'Create';
+        btn.textContent = t('gift.btn_create');
       }
     } catch(e) {
       toast('❌ ' + e.message);
       btn.disabled = false;
-      btn.textContent = lang === 'ru' ? 'Создать' : 'Create';
+      btn.textContent = t('gift.btn_create');
     }
   };
 }
@@ -3230,23 +3259,23 @@ function showCheckCreatedModal(checkLink, amount) {
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
   
   modal.innerHTML = `
-    <div style="background:#1E2329;border-radius:16px;width:100%;max-width:360px;padding:24px;text-align:center">
-      <div style="width:64px;height:64px;background:linear-gradient(135deg,#0ECB81,#0AA56A);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:32px;margin:0 auto 16px">✓</div>
+    <div style="background:#131A2A;border-radius:16px;width:100%;max-width:360px;padding:24px;text-align:center">
+      <div style="width:64px;height:64px;background:linear-gradient(135deg,#00E676,#0AA56A);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:32px;margin:0 auto 16px">✓</div>
       
-      <div style="color:#EAECEF;font-size:20px;font-weight:600;margin-bottom:8px">${lang === 'ru' ? 'Чек создан!' : 'Check Created!'}</div>
-      <div style="color:#0ECB81;font-size:24px;font-weight:700;margin-bottom:16px">${amount} USDT</div>
+      <div style="color:#EAECEF;font-size:20px;font-weight:600;margin-bottom:8px">${t('gift.created_title')}</div>
+      <div style="color:#00E676;font-size:24px;font-weight:700;margin-bottom:16px">${amount} USDT</div>
       
-      <div style="background:#0B0E11;border-radius:8px;padding:12px;margin-bottom:16px">
-        <div style="color:#848E9C;font-size:11px;margin-bottom:6px">${lang === 'ru' ? 'Ссылка для активации:' : 'Activation link:'}</div>
-        <div id="checkLinkText" style="color:#F0B90B;font-size:12px;word-break:break-all;font-family:monospace">${checkLink}</div>
+      <div style="background:#0A0E17;border-radius:8px;padding:12px;margin-bottom:16px">
+        <div style="color:#7B8CA2;font-size:11px;margin-bottom:6px">${t('gift.activation_link')}</div>
+        <div id="checkLinkText" style="color:#E040FB;font-size:12px;word-break:break-all;font-family:monospace">${checkLink}</div>
       </div>
       
-      <button id="copyCheckLinkBtn" style="width:100%;padding:14px;background:linear-gradient(135deg,#F0B90B,#D4A10A);color:#0B0E11;font-size:14px;font-weight:600;border:none;border-radius:8px;cursor:pointer;margin-bottom:10px">
-        📋 ${lang === 'ru' ? 'Скопировать ссылку' : 'Copy Link'}
+      <button id="copyCheckLinkBtn" style="width:100%;padding:14px;background:linear-gradient(135deg,#E040FB,#D4A10A);color:#0A0E17;font-size:14px;font-weight:600;border:none;border-radius:8px;cursor:pointer;margin-bottom:10px">
+        📋 ${t('gift.copy_link')}
       </button>
       
-      <button id="closeCheckModalBtn" style="width:100%;padding:12px;background:#2B3139;color:#848E9C;font-size:14px;border:none;border-radius:8px;cursor:pointer">
-        ${lang === 'ru' ? 'Закрыть' : 'Close'}
+      <button id="closeCheckModalBtn" style="width:100%;padding:12px;background:rgba(255,255,255,0.08);color:#7B8CA2;font-size:14px;border:none;border-radius:8px;cursor:pointer">
+        ${t('gift.close')}
       </button>
     </div>
   `;
@@ -3255,39 +3284,11 @@ function showCheckCreatedModal(checkLink, amount) {
   
   document.getElementById('copyCheckLinkBtn').onclick = () => {
     navigator.clipboard.writeText(checkLink);
-    toast(lang === 'ru' ? '✅ Ссылка скопирована!' : '✅ Link copied!');
+    toast(t('gift.link_copied'));
   };
   
   document.getElementById('closeCheckModalBtn').onclick = () => modal.remove();
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
-}
-
-// Function to create check (admin only - legacy)
-async function createCheck() {
-  const amount = prompt("Введите сумму USDT для чека:", "100");
-  if (!amount) return;
-  
-  const hours = prompt("Срок действия (часы):", "24");
-  if (!hours) return;
-  
-  const r = await apiFetch(`/api/admin/check/create`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      amount_usdt: parseFloat(amount),
-      expires_in_hours: parseInt(hours)
-    })
-  });
-  
-  const d = await r.json();
-  if (d.ok) {
-    const checkLink = d.check_link;
-    navigator.clipboard.writeText(checkLink);
-    toast(`✅ Чек создан!\n💰 ${d.amount_usdt} USDT\n🔗 Ссылка скопирована`);
-    await renderAssets(); // Refresh balance
-  } else {
-    toast(d.error || 'Ошибка создания чека');
-  }
 }
 
 // ========== NOTIFICATIONS SYSTEM ==========
@@ -3324,21 +3325,21 @@ async function openNotificationsModal() {
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.9);z-index:9999;display:flex;flex-direction:column';
   
   modal.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;background:#1E2329;border-bottom:1px solid #2B3139">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;background:#131A2A;border-bottom:1px solid rgba(255,255,255,0.08)">
       <div style="display:flex;align-items:center;gap:10px">
         <span style="font-size:20px">🔔</span>
-        <span style="color:#EAECEF;font-size:16px;font-weight:600">${lang === 'ru' ? 'Уведомления' : 'Notifications'}</span>
+        <span style="color:#EAECEF;font-size:16px;font-weight:600">${t('notifications.title_label')}</span>
       </div>
-      <button id="closeNotificationsBtn" style="background:none;border:none;color:#848E9C;font-size:24px;cursor:pointer;padding:4px">&times;</button>
+      <button id="closeNotificationsBtn" style="background:none;border:none;color:#7B8CA2;font-size:24px;cursor:pointer;padding:4px">&times;</button>
     </div>
     <div id="notificationsList" style="flex:1;overflow-y:auto;padding:12px">
       <div style="display:flex;justify-content:center;padding:40px">
-        <div style="width:24px;height:24px;border:2px solid #F0B90B;border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite"></div>
+        <div style="width:24px;height:24px;border:2px solid #E040FB;border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite"></div>
       </div>
     </div>
-    <div style="padding:12px 16px;background:#1E2329;border-top:1px solid #2B3139">
-      <button id="markAllReadBtn" style="width:100%;padding:12px;background:#2B3139;color:#EAECEF;font-size:14px;border:none;border-radius:8px;cursor:pointer">
-        ${lang === 'ru' ? '✓ Отметить все прочитанными' : '✓ Mark all as read'}
+    <div style="padding:12px 16px;background:#131A2A;border-top:1px solid rgba(255,255,255,0.08)">
+      <button id="markAllReadBtn" style="width:100%;padding:12px;background:rgba(255,255,255,0.08);color:#EAECEF;font-size:14px;border:none;border-radius:8px;cursor:pointer">
+        ${t('notifications.mark_all')}
       </button>
     </div>
   `;
@@ -3359,7 +3360,7 @@ async function openNotificationsModal() {
       list.innerHTML = `
         <div style="text-align:center;padding:60px 20px">
           <div style="font-size:48px;margin-bottom:16px;opacity:0.3">🔔</div>
-          <div style="color:#848E9C;font-size:14px">${lang === 'ru' ? 'Нет уведомлений' : 'No notifications'}</div>
+          <div style="color:#7B8CA2;font-size:14px">${t('notifications.none')}</div>
         </div>
       `;
     } else {
@@ -3368,14 +3369,14 @@ async function openNotificationsModal() {
         const timeAgo = formatTimeAgo(date, lang);
         
         return `
-          <div style="background:${n.is_read ? '#1E2329' : '#252930'};border-radius:10px;padding:14px;margin-bottom:8px;border-left:3px solid ${n.is_read ? '#2B3139' : '#F0B90B'}">
+          <div style="background:${n.is_read ? '#131A2A' : 'rgba(224,64,251,0.06)'};border-radius:10px;padding:14px;margin-bottom:8px;border-left:3px solid ${n.is_read ? 'rgba(255,255,255,0.08)' : '#E040FB'}">
             <div style="display:flex;align-items:flex-start;gap:10px">
               <div style="font-size:18px">${n.is_broadcast ? '📣' : '💬'}</div>
               <div style="flex:1">
                 <div style="color:#EAECEF;font-size:13px;line-height:1.5;white-space:pre-wrap">${escapeHtml(n.message)}</div>
-                <div style="color:#5E6673;font-size:11px;margin-top:6px">${timeAgo}</div>
+                <div style="color:#4A5568;font-size:11px;margin-top:6px">${timeAgo}</div>
               </div>
-              ${!n.is_read ? '<div style="width:8px;height:8px;background:#F0B90B;border-radius:50%;flex-shrink:0;margin-top:4px"></div>' : ''}
+              ${!n.is_read ? '<div style="width:8px;height:8px;background:#E040FB;border-radius:50%;flex-shrink:0;margin-top:4px"></div>' : ''}
             </div>
           </div>
         `;
@@ -3385,7 +3386,7 @@ async function openNotificationsModal() {
     updateNotificationBadge(d.unread_count || 0);
   } catch(e) {
     document.getElementById('notificationsList').innerHTML = `
-      <div style="text-align:center;padding:40px;color:#F6465D">${lang === 'ru' ? 'Ошибка загрузки' : 'Failed to load'}</div>
+      <div style="text-align:center;padding:40px;color:#FF5252">${t('common.failed_load')}</div>
     `;
   }
   
@@ -3398,10 +3399,10 @@ async function openNotificationsModal() {
         body: JSON.stringify({ids: []})
       });
       updateNotificationBadge(0);
-      toast(lang === 'ru' ? '✓ Все уведомления прочитаны' : '✓ All marked as read');
+      toast(t('notifications.all_read'));
       modal.remove();
     } catch(e) {
-      toast(lang === 'ru' ? '❌ Ошибка' : '❌ Error');
+      toast('❌ ' + t('common.error'));
     }
   };
 }
@@ -3410,17 +3411,17 @@ function formatTimeAgo(date, lang) {
   const now = new Date();
   const diff = Math.floor((now - date) / 1000);
   
-  if (diff < 60) return lang === 'ru' ? 'только что' : 'just now';
+  if (diff < 60) return t('time.just_now');
   if (diff < 3600) {
     const mins = Math.floor(diff / 60);
-    return lang === 'ru' ? `${mins} мин назад` : `${mins}m ago`;
+    return t('time.min_ago') ? `${mins} ${t('time.min_ago')}` : `${mins}m ago`;
   }
   if (diff < 86400) {
     const hours = Math.floor(diff / 3600);
-    return lang === 'ru' ? `${hours} ч назад` : `${hours}h ago`;
+    return `${hours} ${t('time.hours_ago')}`;
   }
   const days = Math.floor(diff / 86400);
-  return lang === 'ru' ? `${days} дн назад` : `${days}d ago`;
+  return `${days} ${t('time.days_ago')}`;
 }
 
 function escapeHtml(text) {
@@ -3439,10 +3440,10 @@ async function activateCheck(checkCode) {
   
   const d = await r.json();
   if (d.ok) {
-    toast(`✅ Чек активирован!\n💰 +${d.amount_usdt} USDT\n📊 Баланс: ${d.new_balance} USDT`);
+    toast(`${t('gift.activated_toast')}\n💰 +${fmtNum(d.amount_usdt, 2)} USDT\n${t('gift.balance_label')}: ${fmtNum(d.new_balance, 2)} USDT`);
     await renderAssets(); // Refresh balance
   } else {
-    toast(d.error || 'Ошибка активации чека');
+    toast(d.error || t('gift.activate_error'));
   }
 }
 
@@ -3450,661 +3451,462 @@ async function activateCheck(checkCode) {
 async function renderProfile() {
   setActive('profile');
   const root = document.getElementById('root');
-  root.innerHTML = '<div class="container" style="padding:16px"><div style="text-align:center;padding:40px 0;color:#848E9C">Загрузка...</div></div>';
+  root.innerHTML = '<div class="container" style="padding:16px"><div style="text-align:center;padding:40px 0;color:#7B8CA2">' + t('common.loading_short') + '</div></div>';
   try {
     const res = await apiFetch('/api/user');
     const u = await res.json();
     root.innerHTML = `
     <div class="container" style="padding:16px">
-      <div class="admin-section">
-        <div class="admin-section-title">👤 Мой профиль</div>
+      <div class="profile-section">
+        <div class="profile-section-title">${t('profile.my_profile')}</div>
         <div style="display:flex;flex-direction:column;gap:12px;margin-top:12px">
           <div class="stat-row"><span class="stat-label">Profile ID</span><span class="stat-value">#${u.profile_id || '—'}</span></div>
           <div class="stat-row"><span class="stat-label">Username</span><span class="stat-value">@${u.username || '—'}</span></div>
-          <div class="stat-row"><span class="stat-label">Верификация</span><span class="stat-value">${u.is_verified ? '✅ Верифицирован' : '❌ Не верифицирован'}</span></div>
-          <div class="stat-row"><span class="stat-label">Premium</span><span class="stat-value">${u.is_premium ? '⭐ Активен' : '—'}</span></div>
-          <div class="stat-row"><span class="stat-label">Баланс</span><span class="stat-value" style="color:#F0B90B">${parseFloat(u.balance_usdt || 0).toFixed(2)} USDT</span></div>
-          <div class="stat-row"><span class="stat-label">Дата регистрации</span><span class="stat-value">${u.created_at ? new Date(u.created_at).toLocaleDateString('ru-RU') : '—'}</span></div>
+          <div class="stat-row"><span class="stat-label">${t('profile.verification')}</span><span class="stat-value">${u.is_verified ? t('profile.verified_yes') : t('profile.verified_no')}</span></div>
+          <div class="stat-row"><span class="stat-label">Premium</span><span class="stat-value">${u.is_premium ? t('profile.premium_active') : '—'}</span></div>
+          <div class="stat-row"><span class="stat-label">${t('profile.balance_label')}</span><span class="stat-value" style="color:#E040FB">${fmtNum(u.balance_usdt || 0, 2)} USDT</span></div>
+          <div class="stat-row"><span class="stat-label">${t('admin.registration_date')}</span><span class="stat-value">${u.created_at ? new Date(u.created_at).toLocaleDateString(i18n.lang === 'ru' ? 'ru-RU' : 'en-US') : '—'}</span></div>
         </div>
       </div>
     </div>`;
   } catch(e) {
-    root.innerHTML = '<div class="container" style="padding:16px"><div style="text-align:center;padding:40px 0;color:#F6465D">Ошибка загрузки профиля</div></div>';
+    root.innerHTML = '<div class="container" style="padding:16px"><div style="text-align:center;padding:40px 0;color:#FF5252">' + t('common.loading_profile') + '</div></div>';
   }
 }
 
-// -------- Admin Panel ----------
+// ========== ADMIN PANEL ==========
+let adminCurrentTab = 'dashboard';
+let adminUsersPage = 1;
+let adminWithdrawalsPage = 1;
+let adminLogsPage = 1;
+let adminLuckyPage = 1;
+
 async function renderAdminPanel() {
-  if (!userData?.is_admin) return renderProfile();
-  setActive('profile');
-  const root = document.getElementById('root');
-  root.innerHTML = '<div class="container" style="padding:16px"><div style="text-align:center;padding:40px 0;color:#848E9C">Загрузка панели...</div></div>';
-  let stats = { total_users: 0, active_24h: 0, deposits_today: 0, pending_withdrawals: 0 };
-  try {
-    const res = await apiFetch('/api/admin/dashboard');
-    if (res.ok) stats = await res.json();
-  } catch(e) {}
-  root.innerHTML = `
-  <div class="container" style="padding:16px">
-    <div class="admin-breadcrumb">🛡️ Админ-панель</div>
-    <div class="admin-dashboard">
-      <div class="admin-stat-card">
-        <div class="admin-stat-icon">👥</div>
-        <div class="admin-stat-value">${stats.total_users || 0}</div>
-        <div class="admin-stat-label">Всего пользователей</div>
-      </div>
-      <div class="admin-stat-card">
-        <div class="admin-stat-icon">🟢</div>
-        <div class="admin-stat-value">${stats.active_24h || 0}</div>
-        <div class="admin-stat-label">Активны 24ч</div>
-      </div>
-      <div class="admin-stat-card">
-        <div class="admin-stat-icon">💰</div>
-        <div class="admin-stat-value">${stats.deposits_today || 0}</div>
-        <div class="admin-stat-label">Депозиты сегодня</div>
-      </div>
-      <div class="admin-stat-card">
-        <div class="admin-stat-icon">⏳</div>
-        <div class="admin-stat-value">${stats.pending_withdrawals || 0}</div>
-        <div class="admin-stat-label">Ожидают вывода</div>
-      </div>
+  const root = document.getElementById('mainContent');
+  root.innerHTML = `<div class="container" style="padding:16px">
+    <div class="admin-header">
+      <h2 style="margin:0;font-size:20px">🛡 ${t('admin.title')}</h2>
     </div>
-    <div class="admin-section" style="margin-top:16px">
-      <div class="admin-section-title">⚡ Быстрые действия</div>
-      <div class="admin-action-grid">
-        <button class="admin-action-btn" id="adminUsersBtn">
-          <span class="admin-action-icon">👥</span>
-          <span>Пользователи</span>
-        </button>
-        <button class="admin-action-btn" id="adminWithdrawalsBtn">
-          <span class="admin-action-icon">💸</span>
-          <span>Выводы</span>
-        </button>
-        <button class="admin-action-btn" id="adminBroadcastBtn">
-          <span class="admin-action-icon">📢</span>
-          <span>Рассылка</span>
-        </button>
-        <button class="admin-action-btn" id="adminLogsBtn">
-          <span class="admin-action-icon">📋</span>
-          <span>Логи</span>
-        </button>
-        <button class="admin-action-btn" id="adminLuckyBtn">
-          <span class="admin-action-icon">🍀</span>
-          <span>Повезёт</span>
-        </button>
-      </div>
+    <div class="admin-tabs">
+      <button class="admin-tab ${adminCurrentTab==='dashboard'?'active':''}" onclick="adminSwitchTab('dashboard')">📊 ${t('admin.dashboard')}</button>
+      <button class="admin-tab ${adminCurrentTab==='users'?'active':''}" onclick="adminSwitchTab('users')">👥 ${t('admin.users')}</button>
+      <button class="admin-tab ${adminCurrentTab==='lucky'?'active':''}" onclick="adminSwitchTab('lucky')">🍀 Lucky</button>
+      <button class="admin-tab ${adminCurrentTab==='withdrawals'?'active':''}" onclick="adminSwitchTab('withdrawals')">💸 ${t('admin.withdrawals')}</button>
+      <button class="admin-tab ${adminCurrentTab==='broadcast'?'active':''}" onclick="adminSwitchTab('broadcast')">📢 ${t('admin.broadcast')}</button>
+      <button class="admin-tab ${adminCurrentTab==='checks'?'active':''}" onclick="adminSwitchTab('checks')">🎁 ${t('admin.checks')}</button>
+      <button class="admin-tab ${adminCurrentTab==='logs'?'active':''}" onclick="adminSwitchTab('logs')">📋 ${t('admin.logs')}</button>
     </div>
+    <div id="adminContent" style="margin-top:12px"></div>
   </div>`;
-  document.getElementById('adminUsersBtn').onclick = renderAdminUsers;
-  document.getElementById('adminWithdrawalsBtn').onclick = renderAdminWithdrawals;
-  document.getElementById('adminBroadcastBtn').onclick = renderAdminBroadcast;
-  document.getElementById('adminLogsBtn').onclick = renderAdminLogs;
-  document.getElementById('adminLuckyBtn').onclick = renderAdminLucky;
+  await adminLoadTab(adminCurrentTab);
 }
 
-// -------- Admin Users ----------
-async function renderAdminUsers(page = 1, search = '', filter = '') {
-  if (!userData?.is_admin) return;
-  setActive('profile');
-  const root = document.getElementById('root');
-  if (typeof page !== 'number') { page = 1; search = ''; filter = ''; }
-  root.innerHTML = '<div class="container" style="padding:16px"><div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › Пользователи</div><div style="text-align:center;padding:40px 0;color:#848E9C">Загрузка...</div></div>';
-  document.getElementById('adminBack')?.addEventListener('click', renderAdminPanel);
-  let data = { users: [], total: 0, page: 1, pages: 1 };
+window.adminSwitchTab = async function(tab) {
+  adminCurrentTab = tab;
+  await renderAdminPanel();
+};
+
+async function adminLoadTab(tab) {
+  const c = document.getElementById('adminContent');
+  if(!c) return;
+  c.innerHTML = '<div style="text-align:center;padding:40px"><div class="loader"></div></div>';
   try {
-    const res = await apiFetch(`/api/admin/users?page=${page}&limit=20&search=${encodeURIComponent(search)}&filter=${encodeURIComponent(filter)}`);
-    if (res.ok) data = await res.json();
-  } catch(e) {}
-  const filters = [
-    { key: '', label: 'Все' },
-    { key: 'premium', label: '⭐ Premium' },
-    { key: 'blocked', label: '🚫 Blocked' },
-    { key: 'verified', label: '✓ Verified' },
-    { key: 'with_balance', label: '💰 С балансом' }
-  ];
-  root.innerHTML = `
-  <div class="container" style="padding:16px">
-    <div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › Пользователи</div>
-    <input class="admin-search" id="adminUserSearch" placeholder="Поиск по username или profile ID..." value="${search}"/>
-    <div class="admin-tabs" id="adminFilterTabs">
-      ${filters.map(f => `<button class="admin-tab${filter === f.key ? ' active' : ''}" data-filter="${f.key}">${f.label}</button>`).join('')}
-    </div>
-    <div class="admin-users-list">
-      ${data.users && data.users.length > 0 ? data.users.map(u => `
-        <div class="admin-user-row" data-pid="${u.profile_id}">
-          <div style="flex:1;min-width:0">
-            <div style="font-weight:600;color:#EAECEF;font-size:13px">#${u.profile_id} ${u.username ? '@' + u.username : ''}</div>
-            <div style="font-size:11px;color:#848E9C;margin-top:2px">${parseFloat(u.displayed_balance || u.balance_usdt || 0).toFixed(2)} USDT</div>
-          </div>
-          <div style="display:flex;gap:4px;align-items:center;font-size:14px">
-            ${u.is_verified ? '<span title="Verified">✓</span>' : ''}
-            ${u.is_premium ? '<span title="Premium">⭐</span>' : ''}
-            ${u.is_blocked ? '<span title="Blocked">🚫</span>' : ''}
-          </div>
-        </div>
-      `).join('') : '<div style="text-align:center;padding:32px 0;color:#848E9C">Пользователи не найдены</div>'}
-    </div>
-    ${(data.pages || 1) > 1 ? `
-    <div style="display:flex;justify-content:center;gap:8px;margin-top:16px">
-      ${page > 1 ? `<button class="btn btn-outline" id="adminPrevPage">← Назад</button>` : ''}
-      <span style="color:#848E9C;font-size:12px;align-self:center">${page} / ${data.pages}</span>
-      ${page < data.pages ? `<button class="btn btn-outline" id="adminNextPage">Далее →</button>` : ''}
-    </div>` : ''}
-  </div>`;
-  document.getElementById('adminBack').onclick = renderAdminPanel;
-  const searchInput = document.getElementById('adminUserSearch');
-  let searchTimeout;
-  searchInput.oninput = () => {
-    clearTimeout(searchTimeout);
-    searchTimeout = setTimeout(() => renderAdminUsers(1, searchInput.value, filter), 400);
-  };
-  document.querySelectorAll('#adminFilterTabs .admin-tab').forEach(btn => {
-    btn.onclick = () => renderAdminUsers(1, searchInput.value, btn.dataset.filter);
-  });
-  document.querySelectorAll('.admin-user-row').forEach(row => {
-    row.onclick = () => renderAdminUserCard(row.dataset.pid);
-  });
-  document.getElementById('adminPrevPage')?.addEventListener('click', () => renderAdminUsers(page - 1, search, filter));
-  document.getElementById('adminNextPage')?.addEventListener('click', () => renderAdminUsers(page + 1, search, filter));
+    if(tab==='dashboard') await adminRenderDashboard(c);
+    else if(tab==='users') await adminRenderUsers(c);
+    else if(tab==='lucky') await adminRenderLucky(c);
+    else if(tab==='withdrawals') await adminRenderWithdrawals(c);
+    else if(tab==='broadcast') adminRenderBroadcast(c);
+    else if(tab==='checks') adminRenderChecks(c);
+    else if(tab==='logs') await adminRenderLogs(c);
+  } catch(e) { c.innerHTML = `<div style="color:#FF5252;text-align:center;padding:20px">Ошибка: ${e.message}</div>`; }
 }
 
-// -------- Admin Lucky Mode ----------
-async function renderAdminLucky(page = 1, search = '', filter = '') {
-  if (!userData?.is_admin) return;
-  setActive('profile');
-  const root = document.getElementById('root');
-  if (typeof page !== 'number') { page = 1; search = ''; filter = ''; }
-  root.innerHTML = '<div class="container" style="padding:16px"><div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › Повезёт</div><div style="text-align:center;padding:40px 0;color:#848E9C">Загрузка...</div></div>';
-  document.getElementById('adminBack')?.addEventListener('click', renderAdminPanel);
-  let data = { users: [], total: 0, page: 1, pages: 1 };
-  try {
-    const res = await apiFetch(`/api/admin/lucky/users?page=${page}&search=${encodeURIComponent(search)}&filter=${encodeURIComponent(filter)}`);
-    if (res.ok) data = await res.json();
-  } catch(e) {}
-  const filters = [
-    { key: '', label: 'Все' },
-    { key: 'on', label: '🍀 Lucky ON' },
-    { key: 'off', label: 'Lucky OFF' }
-  ];
-  root.innerHTML = `
-  <div class="container" style="padding:16px">
-    <div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › Повезёт</div>
-    <input class="admin-search" id="luckySearch" placeholder="Поиск по telegram_id или username..." value="${search}"/>
-    <div class="admin-tabs" id="luckyFilterTabs">
-      ${filters.map(f => `<button class="admin-tab${filter === f.key ? ' active' : ''}" data-filter="${f.key}">${f.label}</button>`).join('')}
-    </div>
-    <div class="admin-users-list">
-      ${data.users && data.users.length > 0 ? data.users.map(u => `
-        <div class="admin-user-row" data-pid="${u.profile_id}">
-          <div style="flex:1;min-width:0">
-            <div style="font-weight:600;color:#EAECEF;font-size:13px">#${u.profile_id} ${u.username ? '@' + u.username : ''}</div>
-            <div style="font-size:11px;color:#848E9C;margin-top:2px">${parseFloat(u.balance_usdt || 0).toFixed(2)} USDT</div>
-          </div>
-          <div style="display:flex;gap:6px;align-items:center">
-            <span class="${u.lucky_mode ? 'lucky-badge-on' : 'lucky-badge-off'}">${u.lucky_mode ? 'ON' : 'OFF'}</span>
-            <button class="btn btn-outline" style="padding:4px 10px;font-size:11px" data-open="${u.profile_id}">Открыть</button>
-          </div>
-        </div>
-      `).join('') : '<div style="text-align:center;padding:32px 0;color:#848E9C">Пользователи не найдены</div>'}
-    </div>
-    ${(data.pages || 1) > 1 ? `
-    <div style="display:flex;justify-content:center;gap:8px;margin-top:16px">
-      ${page > 1 ? `<button class="btn btn-outline" id="luckyPrevPage">← Назад</button>` : ''}
-      <span style="color:#848E9C;font-size:12px;align-self:center">${page} / ${data.pages}</span>
-      ${page < data.pages ? `<button class="btn btn-outline" id="luckyNextPage">Далее →</button>` : ''}
-    </div>` : ''}
-  </div>`;
-  document.getElementById('adminBack').onclick = renderAdminPanel;
-  const searchInput = document.getElementById('luckySearch');
-  let searchTimeout;
-  searchInput.oninput = () => {
-    clearTimeout(searchTimeout);
-    searchTimeout = setTimeout(() => renderAdminLucky(1, searchInput.value, filter), 400);
-  };
-  document.querySelectorAll('#luckyFilterTabs .admin-tab').forEach(btn => {
-    btn.onclick = () => renderAdminLucky(1, searchInput.value, btn.dataset.filter);
-  });
-  document.querySelectorAll('[data-open]').forEach(btn => {
-    btn.onclick = (e) => { e.stopPropagation(); renderAdminLuckyCard(btn.dataset.open); };
-  });
-  document.querySelectorAll('.admin-user-row').forEach(row => {
-    row.onclick = () => renderAdminLuckyCard(row.dataset.pid);
-  });
-  document.getElementById('luckyPrevPage')?.addEventListener('click', () => renderAdminLucky(page - 1, search, filter));
-  document.getElementById('luckyNextPage')?.addEventListener('click', () => renderAdminLucky(page + 1, search, filter));
+async function adminRenderDashboard(c) {
+  const r = await apiFetch('/api/admin/dashboard');
+  if(!r.ok) { c.innerHTML = '<div style="color:#FF5252">Ошибка загрузки</div>'; return; }
+  const s = r.stats;
+  c.innerHTML = `
+    <div class="admin-stats-grid">
+      <div class="admin-stat-card"><div class="admin-stat-value">${s.total_users}</div><div class="admin-stat-label">${t('admin.total_users')}</div></div>
+      <div class="admin-stat-card"><div class="admin-stat-value">${s.active_24h}</div><div class="admin-stat-label">${t('admin.active_24h')}</div></div>
+      <div class="admin-stat-card"><div class="admin-stat-value">$${s.deposits_today}</div><div class="admin-stat-label">${t('admin.deposits_today')}</div></div>
+      <div class="admin-stat-card"><div class="admin-stat-value">$${s.deposits_week}</div><div class="admin-stat-label">${t('admin.deposits_week')}</div></div>
+      <div class="admin-stat-card"><div class="admin-stat-value">$${s.deposits_month}</div><div class="admin-stat-label">${t('admin.deposits_month')}</div></div>
+      <div class="admin-stat-card"><div class="admin-stat-value" style="color:#FF5252">${s.pending_withdrawals}</div><div class="admin-stat-label">${t('admin.pending_wd')}</div></div>
+      <div class="admin-stat-card"><div class="admin-stat-value">${s.active_trades}</div><div class="admin-stat-label">${t('admin.active_trades')}</div></div>
+      <div class="admin-stat-card"><div class="admin-stat-value">$${s.total_balance}</div><div class="admin-stat-label">${t('admin.total_balance')}</div></div>
+    </div>`;
 }
 
-async function renderAdminLuckyCard(profileId) {
-  if (!userData?.is_admin) return;
-  setActive('profile');
-  const root = document.getElementById('root');
-  root.innerHTML = '<div class="container" style="padding:16px"><div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › <span class="admin-back-btn" id="luckyBack">Повезёт</span> › #' + profileId + '</div><div style="text-align:center;padding:40px 0;color:#848E9C">Загрузка...</div></div>';
-  document.getElementById('adminBack')?.addEventListener('click', renderAdminPanel);
-  document.getElementById('luckyBack')?.addEventListener('click', () => renderAdminLucky());
-  let u = null;
-  let history = [];
-  try {
-    const [userRes, histRes] = await Promise.all([
-      apiFetch(`/api/admin/lucky/users?search=${profileId}`),
-      apiFetch(`/api/admin/lucky/history/${profileId}`)
-    ]);
-    if (userRes.ok) {
-      const ud = await userRes.json();
-      u = ud.users && ud.users.length > 0 ? ud.users[0] : null;
-    }
-    if (histRes.ok) {
-      const hd = await histRes.json();
-      history = hd.history || [];
-    }
-  } catch(e) {}
-  if (!u) {
-    root.innerHTML = '<div class="container" style="padding:16px"><div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › <span class="admin-back-btn" id="luckyBack">Повезёт</span></div><div style="text-align:center;padding:40px 0;color:#848E9C">Пользователь не найден</div></div>';
-    document.getElementById('adminBack')?.addEventListener('click', renderAdminPanel);
-    document.getElementById('luckyBack')?.addEventListener('click', () => renderAdminLucky());
-    return;
+async function adminRenderUsers(c, search='', filter='') {
+  const params = new URLSearchParams({page: adminUsersPage, limit: 20});
+  if(search) params.set('search', search);
+  if(filter) params.set('filter', filter);
+  const r = await apiFetch('/api/admin/users?' + params);
+  if(!r.ok) { c.innerHTML = '<div style="color:#FF5252">Ошибка</div>'; return; }
+  let html = `<div class="admin-search-bar">
+    <input type="text" id="adminUserSearch" placeholder="${t('admin.search_placeholder')}" value="${search}" class="admin-input" />
+    <select id="adminUserFilter" class="admin-select">
+      <option value="">Все</option>
+      <option value="premium" ${filter==='premium'?'selected':''}>Premium</option>
+      <option value="blocked" ${filter==='blocked'?'selected':''}>Blocked</option>
+      <option value="verified" ${filter==='verified'?'selected':''}>Verified</option>
+      <option value="with_balance" ${filter==='with_balance'?'selected':''}>С балансом</option>
+    </select>
+    <button class="admin-action-btn" onclick="adminSearchUsers()">🔍</button>
+  </div>
+  <div class="admin-users-list">`;
+  for(const u of r.users) {
+    const bal = fmtNum(u.balance_usdt || 0, 2);
+    const badges = [];
+    if(u.is_premium) badges.push('⭐');
+    if(u.is_verified) badges.push('✅');
+    if(u.is_blocked) badges.push('🚫');
+    html += `<div class="admin-user-row" onclick="adminOpenUser(${u.profile_id})">
+      <div class="admin-user-info">
+        <span class="admin-user-name">${u.username||'No name'} ${badges.join('')}</span>
+        <span class="admin-user-id">ID: ${u.profile_id} | TG: ${u.telegram_id}</span>
+      </div>
+      <div class="admin-user-balance">$${bal}</div>
+    </div>`;
   }
-  const isOn = u.lucky_mode;
-  root.innerHTML = `
-  <div class="container" style="padding:16px">
-    <div class="admin-breadcrumb">
-      <span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › 
-      <span class="admin-back-btn" id="luckyBack">Повезёт</span> › #${profileId}
-    </div>
+  html += '</div>';
+  if(r.pages > 1) {
+    html += `<div class="admin-pagination">
+      ${adminUsersPage > 1 ? `<button class="admin-page-btn" onclick="adminUsersPage--;adminSearchUsers()">←</button>` : ''}
+      <span>${adminUsersPage}/${r.pages}</span>
+      ${adminUsersPage < r.pages ? `<button class="admin-page-btn" onclick="adminUsersPage++;adminSearchUsers()">→</button>` : ''}
+    </div>`;
+  }
+  c.innerHTML = html;
+}
+
+window.adminSearchUsers = async function() {
+  const search = document.getElementById('adminUserSearch')?.value || '';
+  const filter = document.getElementById('adminUserFilter')?.value || '';
+  const c = document.getElementById('adminContent');
+  if(c) await adminRenderUsers(c, search, filter);
+};
+
+window.adminOpenUser = async function(profileId) {
+  const c = document.getElementById('adminContent');
+  if(!c) return;
+  c.innerHTML = '<div style="text-align:center;padding:40px"><div class="loader"></div></div>';
+  try {
+    const r = await apiFetch('/api/admin/user/' + profileId);
+    if(!r.ok) { c.innerHTML = '<div style="color:#FF5252">Ошибка загрузки</div>'; return; }
+    const u = r.user;
+    let html = `<button class="admin-back-btn" onclick="adminSwitchTab('users')">← ${t('admin.back')}</button>
     <div class="admin-user-card">
-      <div class="admin-section">
-        <div class="admin-section-title">📋 Информация</div>
-        <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px">
-          <div class="stat-row"><span class="stat-label">Telegram ID</span><span class="stat-value">${u.telegram_id || '—'}</span></div>
-          <div class="stat-row"><span class="stat-label">Profile ID</span><span class="stat-value">#${u.profile_id || profileId}</span></div>
-          <div class="stat-row"><span class="stat-label">Username</span><span class="stat-value">${u.username ? '@' + u.username : '—'}</span></div>
-          <div class="stat-row"><span class="stat-label">Lucky</span><span class="${isOn ? 'lucky-badge-on' : 'lucky-badge-off'}">${isOn ? 'ON' : 'OFF'}</span></div>
-          ${u.lucky_until ? `<div class="stat-row"><span class="stat-label">До</span><span class="stat-value">${new Date(u.lucky_until).toLocaleString('ru-RU')}</span></div>` : ''}
-          ${u.lucky_max_wins != null ? `<div class="stat-row"><span class="stat-label">Макс. побед</span><span class="stat-value">${u.lucky_wins_used}/${u.lucky_max_wins}</span></div>` : ''}
+      <div class="admin-user-card-header">
+        <h3>${u.username || 'No name'}</h3>
+        <div class="admin-user-card-badges">
+          ${u.is_verified ? '<span class="admin-badge admin-badge-green">✅ Verified</span>' : ''}
+          ${u.is_premium ? '<span class="admin-badge admin-badge-gold">⭐ Premium</span>' : ''}
+          ${u.is_blocked ? '<span class="admin-badge admin-badge-red">🚫 Blocked</span>' : ''}
         </div>
       </div>
-      <div class="admin-section" style="margin-top:12px">
-        <div class="admin-section-title">🍀 Управление Lucky Mode</div>
-        <div style="margin-top:10px">
-          <label class="label">Причина *</label>
-          <textarea class="input" id="luckyReason" rows="2" placeholder="Укажите причину..." style="resize:vertical"></textarea>
-        </div>
-        <div style="display:flex;gap:8px;margin-top:10px">
-          <div style="flex:1">
-            <label class="label">До (опционально)</label>
-            <input type="datetime-local" class="input" id="luckyUntil" />
-          </div>
-          <div style="flex:1">
-            <label class="label">Макс. побед (опц.)</label>
-            <input type="number" class="input" id="luckyMaxWins" min="1" placeholder="∞" />
-          </div>
-        </div>
-        <button class="btn ${isOn ? 'btn-red' : 'btn-green'} fullwidth" style="margin-top:12px" id="luckyToggleBtn">
-          ${isOn ? 'Выключить Lucky' : 'Включить Lucky'}
-        </button>
+      <div class="admin-user-details">
+        <div class="admin-detail-row"><span>Profile ID:</span><span>${u.profile_id}</span></div>
+        <div class="admin-detail-row"><span>Telegram ID:</span><span>${u.telegram_id}</span></div>
+        <div class="admin-detail-row"><span>Balance:</span><span style="color:#00E676">$${u.balance_usdt}</span></div>
+        <div class="admin-detail-row"><span>Referral Code:</span><span>${u.referral_code||'-'}</span></div>
+        <div class="admin-detail-row"><span>Referred By:</span><span>${u.referred_by||'-'}</span></div>
+        <div class="admin-detail-row"><span>Language:</span><span>${u.language||'ru'}</span></div>
+        <div class="admin-detail-row"><span>Created:</span><span>${u.created_at ? new Date(u.created_at).toLocaleString() : '-'}</span></div>
       </div>
-      ${history.length > 0 ? `
-      <div class="admin-section" style="margin-top:12px">
-        <div class="admin-section-title">📜 История изменений</div>
-        <div style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
-          ${history.map(h => `
-            <div class="admin-log-item">
-              <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="font-weight:600;font-size:12px;color:${h.action === 'LUCKY_ENABLE' ? '#0ECB81' : '#F6465D'}">${h.action === 'LUCKY_ENABLE' ? '🍀 Включено' : '❌ Выключено'}</span>
-                <span style="font-size:11px;color:#848E9C">${h.created_at ? new Date(h.created_at).toLocaleString('ru-RU') : '—'}</span>
-              </div>
-              <div style="font-size:11px;color:#848E9C;margin-top:4px">Admin: ${h.admin_id}</div>
-              ${h.reason ? `<div style="font-size:11px;color:#EAECEF;margin-top:2px">Причина: ${h.reason}</div>` : ''}
-              ${h.before ? `<div style="font-size:10px;color:#5E6673;margin-top:2px">До: ${h.before}</div>` : ''}
-              ${h.after ? `<div style="font-size:10px;color:#5E6673">После: ${h.after}</div>` : ''}
-            </div>
-          `).join('')}
+      <div class="admin-actions-section">
+        <h4>${t('admin.balance_mgmt')}</h4>
+        <div class="admin-balance-controls">
+          <select id="adminBalAction" class="admin-select"><option value="add">+Add</option><option value="subtract">-Sub</option><option value="set">Set</option></select>
+          <input type="number" id="adminBalAmount" class="admin-input" placeholder="Amount" step="0.01" />
+          <button class="admin-action-btn admin-btn-green" onclick="adminChangeBalance(${u.profile_id})">💰</button>
         </div>
-      </div>` : ''}
-    </div>
-  </div>`;
-  document.getElementById('adminBack').onclick = renderAdminPanel;
-  document.getElementById('luckyBack').onclick = () => renderAdminLucky();
-  document.getElementById('luckyToggleBtn').onclick = async () => {
-    const reason = document.getElementById('luckyReason').value.trim();
-    if (!reason) { toast('Укажите причину'); return; }
-    const until = document.getElementById('luckyUntil').value || null;
-    const maxWinsVal = document.getElementById('luckyMaxWins').value;
-    const max_wins = maxWinsVal ? parseInt(maxWinsVal) : null;
-    const enabling = !isOn;
-    try {
-      const res = await apiFetch('/api/admin/lucky/set', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          target_telegram_id: u.telegram_id,
-          enabled: enabling,
-          reason: reason,
-          until: until ? new Date(until).toISOString() : null,
-          max_wins: enabling ? max_wins : null
-        })
-      });
-      const data = await res.json();
-      if (data.ok) {
-        toast(enabling ? 'Lucky Mode включён' : 'Lucky Mode выключен');
-        renderAdminLuckyCard(profileId);
-      } else {
-        toast(data.error || 'Ошибка');
+        <h4>${t('admin.status_mgmt')}</h4>
+        <div class="admin-status-controls">
+          <button class="admin-action-btn" onclick="adminToggleStatus(${u.profile_id},'verify')">${u.is_verified?'❌ Unverify':'✅ Verify'}</button>
+          <button class="admin-action-btn" onclick="adminToggleStatus(${u.profile_id},'premium')">${u.is_premium?'❌ Unpremium':'⭐ Premium'}</button>
+          ${u.is_blocked?`<button class="admin-action-btn admin-btn-green" onclick="adminToggleStatus(${u.profile_id},'unblock')">🔓 Unblock</button>`:`<button class="admin-action-btn admin-btn-red" onclick="adminBlockUser(${u.profile_id})">🚫 Block</button>`}
+        </div>
+        <h4>${t('admin.send_msg')}</h4>
+        <div class="admin-msg-controls">
+          <input type="text" id="adminMsgText" class="admin-input" placeholder="${t('admin.msg_placeholder')}" />
+          <button class="admin-action-btn" onclick="adminSendMessage(${u.profile_id})">📨</button>
+        </div>
+      </div>
+    </div>`;
+    if(r.transactions && r.transactions.length) {
+      html += `<h4 style="margin-top:16px">${t('admin.recent_txs')} (${r.transactions.length})</h4><div class="admin-table-wrap"><table class="admin-table"><tr><th>Type</th><th>Amount</th><th>Status</th><th>Date</th></tr>`;
+      for(const tx of r.transactions.slice(0,20)) {
+        html += `<tr><td>${tx.type}</td><td>${tx.amount} ${tx.currency}</td><td>${tx.status}</td><td>${tx.created_at?new Date(tx.created_at).toLocaleString():'-'}</td></tr>`;
       }
-    } catch(e) { toast('Ошибка сети'); }
-  };
+      html += '</table></div>';
+    }
+    if(r.trades && r.trades.length) {
+      html += `<h4 style="margin-top:16px">${t('admin.recent_trades')} (${r.trades.length})</h4><div class="admin-table-wrap"><table class="admin-table"><tr><th>Pair</th><th>Side</th><th>Amount</th><th>Result</th><th>Payout</th></tr>`;
+      for(const tr of r.trades.slice(0,20)) {
+        const resColor = tr.result==='win'?'#00E676':tr.result==='loss'?'#FF5252':'#888';
+        html += `<tr><td>${tr.pair}</td><td>${tr.side}</td><td>$${fmtNum(tr.amount_usdt, 0)}</td><td style="color:${resColor}">${(tr.result||tr.status).toUpperCase()}</td><td>$${fmtNum(tr.payout, 0)}</td></tr>`;
+      }
+      html += '</table></div>';
+    }
+    c.innerHTML = html;
+  } catch(e) { c.innerHTML = `<div style="color:#FF5252">${e.message}</div>`; }
+};
+
+window.adminChangeBalance = async function(profileId) {
+  const action = document.getElementById('adminBalAction')?.value || 'add';
+  const amount = parseFloat(document.getElementById('adminBalAmount')?.value);
+  if(!amount || amount <= 0) { toast('Введите сумму'); return; }
+  const r = await apiFetch('/api/admin/user/' + profileId + '/balance', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action,amount,type:'real'})});
+  if(r.ok) { toast(`✅ Баланс: $${r.balance_usdt}`); adminOpenUser(profileId); }
+  else toast('❌ Ошибка: ' + (r.error||''));
+};
+
+window.adminToggleStatus = async function(profileId, action) {
+  const r = await apiFetch('/api/admin/user/' + profileId + '/status', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action})});
+  if(r.ok) { toast('✅ Обновлено'); adminOpenUser(profileId); }
+  else toast('❌ Ошибка');
+};
+
+window.adminBlockUser = async function(profileId) {
+  const reason = prompt('Причина блокировки:');
+  if(!reason) return;
+  const r = await apiFetch('/api/admin/user/' + profileId + '/status', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'block',reason})});
+  if(r.ok) { toast('🚫 Заблокирован'); adminOpenUser(profileId); }
+  else toast('❌ Ошибка');
+};
+
+window.adminSendMessage = async function(profileId) {
+  const text = document.getElementById('adminMsgText')?.value;
+  if(!text) { toast('Введите сообщение'); return; }
+  const r = await apiFetch('/api/admin/user/' + profileId + '/message', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text})});
+  if(r.ok && r.message_sent) toast('📨 Отправлено');
+  else toast('❌ Не удалось отправить');
+};
+
+async function adminRenderLucky(c, search='', filter='') {
+  const params = new URLSearchParams({page: adminLuckyPage});
+  if(search) params.set('search', search);
+  if(filter) params.set('filter', filter);
+  const r = await apiFetch('/api/admin/lucky/users?' + params);
+  if(!r.ok) { c.innerHTML = '<div style="color:#FF5252">Ошибка</div>'; return; }
+  let html = `<div class="admin-search-bar">
+    <input type="text" id="adminLuckySearch" placeholder="Поиск по ID/username" value="${search}" class="admin-input" />
+    <select id="adminLuckyFilter" class="admin-select"><option value="">Все</option><option value="on" ${filter==='on'?'selected':''}>🍀 ON</option><option value="off" ${filter==='off'?'selected':''}>OFF</option></select>
+    <button class="admin-action-btn" onclick="adminSearchLucky()">🔍</button>
+  </div><div class="admin-users-list">`;
+  for(const u of r.users) {
+    html += `<div class="admin-user-row" onclick="adminOpenLuckyUser('${u.telegram_id}', ${u.profile_id})">
+      <div class="admin-user-info">
+        <span class="admin-user-name">${u.username||'No name'} ${u.lucky_mode?'🍀':''}</span>
+        <span class="admin-user-id">ID: ${u.profile_id} | $${u.balance_usdt}</span>
+      </div>
+      <div class="admin-lucky-status">${u.lucky_mode?'<span style="color:#00E676">ON</span>':'<span style="color:#888">OFF</span>'}</div>
+    </div>`;
+  }
+  html += '</div>';
+  if(r.pages > 1) {
+    html += `<div class="admin-pagination">
+      ${adminLuckyPage > 1 ? `<button class="admin-page-btn" onclick="adminLuckyPage--;adminSearchLucky()">←</button>` : ''}
+      <span>${adminLuckyPage}/${r.pages}</span>
+      ${adminLuckyPage < r.pages ? `<button class="admin-page-btn" onclick="adminLuckyPage++;adminSearchLucky()">→</button>` : ''}
+    </div>`;
+  }
+  c.innerHTML = html;
 }
 
-// -------- Admin User Card ----------
-async function renderAdminUserCard(profileId) {
-  if (!userData?.is_admin) return;
-  setActive('profile');
-  const root = document.getElementById('root');
-  root.innerHTML = '<div class="container" style="padding:16px"><div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › <span class="admin-back-btn" id="adminUsersBack">Пользователи</span> › #' + profileId + '</div><div style="text-align:center;padding:40px 0;color:#848E9C">Загрузка...</div></div>';
-  document.getElementById('adminBack')?.addEventListener('click', renderAdminPanel);
-  document.getElementById('adminUsersBack')?.addEventListener('click', () => renderAdminUsers());
-  let u = {};
-  try {
-    const res = await apiFetch(`/api/admin/user/${profileId}`);
-    if (res.ok) u = await res.json();
-  } catch(e) {}
-  const transactions = u.transactions || [];
-  const trades = u.trades || [];
-  root.innerHTML = `
-  <div class="container" style="padding:16px">
-    <div class="admin-breadcrumb">
-      <span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › 
-      <span class="admin-back-btn" id="adminUsersBack">Пользователи</span> › #${profileId}
+window.adminSearchLucky = async function() {
+  const search = document.getElementById('adminLuckySearch')?.value || '';
+  const filter = document.getElementById('adminLuckyFilter')?.value || '';
+  const c = document.getElementById('adminContent');
+  if(c) await adminRenderLucky(c, search, filter);
+};
+
+window.adminOpenLuckyUser = async function(telegramId, profileId) {
+  const c = document.getElementById('adminContent');
+  if(!c) return;
+  c.innerHTML = '<div style="text-align:center;padding:40px"><div class="loader"></div></div>';
+  const rUser = await apiFetch('/api/admin/user/' + profileId);
+  const rHist = await apiFetch('/api/admin/lucky/history/' + profileId);
+  const u = rUser.user;
+  let html = `<button class="admin-back-btn" onclick="adminSwitchTab('lucky')">← Назад</button>
+  <div class="admin-user-card">
+    <h3>🍀 Lucky Mode: ${u.username||'No name'}</h3>
+    <div class="admin-user-details">
+      <div class="admin-detail-row"><span>Telegram ID:</span><span>${u.telegram_id}</span></div>
+      <div class="admin-detail-row"><span>Balance:</span><span>$${fmtNum(u.balance_usdt||0, 2)}</span></div>
     </div>
-    <div class="admin-user-card">
-      <div class="admin-section">
-        <div class="admin-section-title">📋 Информация</div>
-        <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px">
-          <div class="stat-row"><span class="stat-label">Telegram ID</span><span class="stat-value">${u.telegram_id || '—'}</span></div>
-          <div class="stat-row"><span class="stat-label">Profile ID</span><span class="stat-value">#${u.profile_id || profileId}</span></div>
-          <div class="stat-row"><span class="stat-label">Username</span><span class="stat-value">@${u.username || '—'}</span></div>
-          <div class="stat-row"><span class="stat-label">Дата регистрации</span><span class="stat-value">${u.created_at ? new Date(u.created_at).toLocaleDateString('ru-RU') : '—'}</span></div>
-        </div>
+    <div class="admin-lucky-controls">
+      <h4>Настройки Lucky Mode</h4>
+      <div class="admin-lucky-form">
+        <label>Включить</label>
+        <select id="luckyEnabled" class="admin-select"><option value="true">ON 🍀</option><option value="false">OFF</option></select>
+        <label>Причина (обязательно)</label>
+        <input type="text" id="luckyReason" class="admin-input" placeholder="Причина" />
+        <label>До (дата, необязательно)</label>
+        <input type="datetime-local" id="luckyUntil" class="admin-input" />
+        <label>Макс. побед (необязательно)</label>
+        <input type="number" id="luckyMaxWins" class="admin-input" placeholder="Без лимита" />
+        <button class="admin-action-btn admin-btn-green" onclick="adminSetLucky('${telegramId}', ${profileId})" style="margin-top:8px;width:100%">💾 Сохранить</button>
       </div>
-      <div class="admin-section" style="margin-top:12px">
-        <div class="admin-section-title">⚙️ Статусы</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
-          <button class="admin-status-btn ${u.is_verified ? 'active-green' : ''}" id="btnVerify">✓ ${u.is_verified ? 'Верифицирован' : 'Верифицировать'}</button>
-          <button class="admin-status-btn ${u.is_premium ? 'active-gold' : ''}" id="btnPremium">⭐ ${u.is_premium ? 'Premium' : 'Дать Premium'}</button>
-          <button class="admin-status-btn ${u.is_blocked ? 'active-red' : ''}" id="btnBlock">🚫 ${u.is_blocked ? 'Разблокировать' : 'Заблокировать'}</button>
-        </div>
-      </div>
-      <div class="admin-section" style="margin-top:12px">
-        <div class="admin-section-title">💰 Балансы</div>
-        <div class="admin-balance-block">
-          <div class="stat-row"><span class="stat-label">Реальный баланс</span><span class="stat-value" style="color:#0ECB81">${parseFloat(u.real_balance || 0).toFixed(2)} USDT</span></div>
-          <div class="stat-row"><span class="stat-label">Виртуальный баланс</span><span class="stat-value" style="color:#F0B90B">${parseFloat(u.virtual_balance || 0).toFixed(2)} USDT</span></div>
-          <div class="stat-row"><span class="stat-label">Отображаемый баланс</span><span class="stat-value" style="color:#EAECEF;font-weight:700">${parseFloat(u.displayed_balance || u.balance_usdt || 0).toFixed(2)} USDT</span></div>
-        </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
-          <button class="btn btn-outline" id="btnAddVirtual" style="flex:1">+ Виртуальный</button>
-          <button class="btn btn-outline" id="btnSetVirtual" style="flex:1">= Виртуальный</button>
-          <button class="btn btn-outline" id="btnAddReal" style="flex:1">+ Реальный</button>
-        </div>
-      </div>
-      <div class="admin-section" style="margin-top:12px">
-        <button class="btn btn-primary" id="btnSendMsg" style="width:100%">✉️ Отправить сообщение</button>
-      </div>
-      ${transactions.length > 0 ? `
-      <div class="admin-section" style="margin-top:12px">
-        <div class="admin-section-title">📊 Последние транзакции</div>
-        <div style="margin-top:10px">
-          ${transactions.slice(0, 10).map(tx => `
-            <div class="admin-log-item">
-              <div style="display:flex;justify-content:space-between">
-                <span style="color:#EAECEF;font-weight:500">${tx.type || tx.action || '—'}</span>
-                <span style="color:${(tx.amount || 0) >= 0 ? '#0ECB81' : '#F6465D'};font-family:var(--font-mono)">${(tx.amount || 0) >= 0 ? '+' : ''}${parseFloat(tx.amount || 0).toFixed(2)}</span>
-              </div>
-              <div style="font-size:11px;color:#848E9C;margin-top:4px">${tx.created_at ? new Date(tx.created_at).toLocaleString('ru-RU') : ''}</div>
-            </div>
-          `).join('')}
-        </div>
-      </div>` : ''}
-      ${trades.length > 0 ? `
-      <div class="admin-section" style="margin-top:12px">
-        <div class="admin-section-title">📈 Последние сделки</div>
-        <div style="margin-top:10px">
-          ${trades.slice(0, 10).map(tr => `
-            <div class="admin-log-item">
-              <div style="display:flex;justify-content:space-between">
-                <span style="color:#EAECEF">${tr.pair || '—'} ${tr.direction || ''}</span>
-                <span style="color:${tr.result === 'win' ? '#0ECB81' : '#F6465D'}">${tr.result === 'win' ? '+' : '-'}${parseFloat(tr.amount || 0).toFixed(2)}</span>
-              </div>
-              <div style="font-size:11px;color:#848E9C;margin-top:4px">${tr.created_at ? new Date(tr.created_at).toLocaleString('ru-RU') : ''}</div>
-            </div>
-          `).join('')}
-        </div>
-      </div>` : ''}
     </div>
   </div>`;
-  document.getElementById('adminBack').onclick = renderAdminPanel;
-  document.getElementById('adminUsersBack').onclick = () => renderAdminUsers();
-  document.getElementById('btnVerify').onclick = async () => {
-    const action = u.is_verified ? 'unverify' : 'verify';
-    try {
-      const res = await apiFetch(`/api/admin/user/${profileId}/status`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
-      const d = await res.json();
-      if (d.ok || res.ok) { toast('✅ Статус обновлён'); renderAdminUserCard(profileId); } else toast(d.error || 'Ошибка');
-    } catch(e) { toast('Ошибка сети'); }
-  };
-  document.getElementById('btnPremium').onclick = async () => {
-    const action = u.is_premium ? 'remove_premium' : 'set_premium';
-    try {
-      const res = await apiFetch(`/api/admin/user/${profileId}/status`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
-      const d = await res.json();
-      if (d.ok || res.ok) { toast('✅ Статус обновлён'); renderAdminUserCard(profileId); } else toast(d.error || 'Ошибка');
-    } catch(e) { toast('Ошибка сети'); }
-  };
-  document.getElementById('btnBlock').onclick = async () => {
-    const action = u.is_blocked ? 'unblock' : 'block';
-    let reason = '';
-    if (action === 'block') { reason = prompt('Причина блокировки:'); if (reason === null) return; }
-    try {
-      const res = await apiFetch(`/api/admin/user/${profileId}/status`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, reason }) });
-      const d = await res.json();
-      if (d.ok || res.ok) { toast('✅ Статус обновлён'); renderAdminUserCard(profileId); } else toast(d.error || 'Ошибка');
-    } catch(e) { toast('Ошибка сети'); }
-  };
-  document.getElementById('btnAddVirtual').onclick = async () => {
-    const amount = prompt('Сумма для добавления к виртуальному балансу (USDT):');
-    if (!amount || isNaN(amount)) return;
-    try {
-      const res = await apiFetch(`/api/admin/user/${profileId}/balance`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'add', amount: parseFloat(amount), type: 'virtual' }) });
-      const d = await res.json();
-      if (d.ok || res.ok) { toast('✅ Баланс обновлён'); renderAdminUserCard(profileId); } else toast(d.error || 'Ошибка');
-    } catch(e) { toast('Ошибка сети'); }
-  };
-  document.getElementById('btnSetVirtual').onclick = async () => {
-    const amount = prompt('Установить виртуальный баланс (USDT):');
-    if (!amount || isNaN(amount)) return;
-    try {
-      const res = await apiFetch(`/api/admin/user/${profileId}/balance`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'set', amount: parseFloat(amount), type: 'virtual' }) });
-      const d = await res.json();
-      if (d.ok || res.ok) { toast('✅ Баланс обновлён'); renderAdminUserCard(profileId); } else toast(d.error || 'Ошибка');
-    } catch(e) { toast('Ошибка сети'); }
-  };
-  document.getElementById('btnAddReal').onclick = async () => {
-    const amount = prompt('Сумма для добавления к реальному балансу (USDT):');
-    if (!amount || isNaN(amount)) return;
-    try {
-      const res = await apiFetch(`/api/admin/user/${profileId}/balance`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'add', amount: parseFloat(amount), type: 'real' }) });
-      const d = await res.json();
-      if (d.ok || res.ok) { toast('✅ Баланс обновлён'); renderAdminUserCard(profileId); } else toast(d.error || 'Ошибка');
-    } catch(e) { toast('Ошибка сети'); }
-  };
-  document.getElementById('btnSendMsg').onclick = async () => {
-    const text = prompt('Сообщение пользователю:');
-    if (!text) return;
-    try {
-      const res = await apiFetch(`/api/admin/user/${profileId}/message`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
-      const d = await res.json();
-      if (d.ok || res.ok) toast('✅ Сообщение отправлено'); else toast(d.error || 'Ошибка');
-    } catch(e) { toast('Ошибка сети'); }
-  };
+  if(rHist.ok && rHist.history && rHist.history.length) {
+    html += `<h4 style="margin-top:16px">📋 История Lucky</h4><div class="admin-table-wrap"><table class="admin-table"><tr><th>Action</th><th>Before</th><th>After</th><th>Reason</th><th>Date</th></tr>`;
+    for(const h of rHist.history) {
+      html += `<tr><td>${h.action}</td><td style="font-size:11px">${h.before||'-'}</td><td style="font-size:11px">${h.after||'-'}</td><td>${h.reason||'-'}</td><td>${h.created_at?new Date(h.created_at).toLocaleString():'-'}</td></tr>`;
+    }
+    html += '</table></div>';
+  }
+  c.innerHTML = html;
+};
+
+window.adminSetLucky = async function(telegramId, profileId) {
+  const enabled = document.getElementById('luckyEnabled')?.value === 'true';
+  const reason = document.getElementById('luckyReason')?.value;
+  if(!reason) { toast('Укажите причину'); return; }
+  const until = document.getElementById('luckyUntil')?.value || null;
+  const maxWins = parseInt(document.getElementById('luckyMaxWins')?.value) || null;
+  const r = await apiFetch('/api/admin/lucky/set', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({target_telegram_id: telegramId, enabled, reason, until, max_wins: maxWins})});
+  if(r.ok) { toast(enabled ? '🍀 Lucky Mode ON' : 'Lucky Mode OFF'); adminOpenLuckyUser(telegramId, profileId); }
+  else toast('❌ ' + (r.error||'Ошибка'));
+};
+
+async function adminRenderWithdrawals(c) {
+  const params = new URLSearchParams({page: adminWithdrawalsPage, limit: 20, status: 'pending'});
+  const r = await apiFetch('/api/admin/withdrawals?' + params);
+  if(!r.ok) { c.innerHTML = '<div style="color:#FF5252">Ошибка</div>'; return; }
+  let html = `<div class="admin-search-bar">
+    <select id="adminWdFilter" class="admin-select" onchange="adminFilterWithdrawals()">
+      <option value="pending">⏳ Pending</option><option value="completed">✅ Completed</option><option value="cancelled">❌ Cancelled</option><option value="all">All</option>
+    </select>
+  </div>`;
+  if(!r.withdrawals.length) {
+    html += `<div style="text-align:center;padding:40px;color:#5A6577">${t('admin.no_withdrawals')}</div>`;
+  } else {
+    html += '<div class="admin-withdrawals-list">';
+    for(const w of r.withdrawals) {
+      html += `<div class="admin-wd-card">
+        <div class="admin-wd-header">
+          <span class="admin-wd-user" onclick="adminOpenUser(${w.profile_id})">${w.username||'User'} (ID: ${w.profile_id})</span>
+          <span class="admin-wd-amount">$${w.amount_rub}</span>
+        </div>
+        <div class="admin-wd-details">
+          <div>📋 Address: <span style="font-size:11px;word-break:break-all">${w.card_number||'-'}</span></div>
+          <div>🌐 Network: ${w.full_name||'-'}</div>
+          <div>📅 ${w.created_at?new Date(w.created_at).toLocaleString():'-'}</div>
+        </div>
+        ${w.status==='pending'?`<div class="admin-wd-actions">
+          <button class="admin-action-btn admin-btn-green" onclick="adminWdAction(${w.id},'approve')">✅ Approve</button>
+          <button class="admin-action-btn admin-btn-red" onclick="adminWdAction(${w.id},'reject')">❌ Reject</button>
+        </div>`:`<div class="admin-wd-status admin-wd-status-${w.status}">${w.status.toUpperCase()}</div>`}
+      </div>`;
+    }
+    html += '</div>';
+  }
+  if(r.pages > 1) {
+    html += `<div class="admin-pagination">
+      ${adminWithdrawalsPage > 1 ? `<button class="admin-page-btn" onclick="adminWithdrawalsPage--;adminFilterWithdrawals()">←</button>` : ''}
+      <span>${adminWithdrawalsPage}/${r.pages}</span>
+      ${adminWithdrawalsPage < r.pages ? `<button class="admin-page-btn" onclick="adminWithdrawalsPage++;adminFilterWithdrawals()">→</button>` : ''}
+    </div>`;
+  }
+  c.innerHTML = html;
 }
 
-// -------- Admin Withdrawals ----------
-async function renderAdminWithdrawals(status = 'pending', page = 1) {
-  if (!userData?.is_admin) return;
-  setActive('profile');
-  const root = document.getElementById('root');
-  if (typeof status !== 'string') { status = 'pending'; page = 1; }
-  root.innerHTML = '<div class="container" style="padding:16px"><div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › Выводы</div><div style="text-align:center;padding:40px 0;color:#848E9C">Загрузка...</div></div>';
-  document.getElementById('adminBack')?.addEventListener('click', renderAdminPanel);
-  let data = { withdrawals: [], total: 0, page: 1, pages: 1 };
-  try {
-    const res = await apiFetch(`/api/admin/withdrawals?status=${status}&page=${page}`);
-    if (res.ok) data = await res.json();
-  } catch(e) {}
-  const tabs = [
-    { key: 'pending', label: '⏳ Ожидающие' },
-    { key: 'completed', label: '✅ Завершённые' },
-    { key: 'rejected', label: '❌ Отклонённые' },
-    { key: 'all', label: '📋 Все' }
-  ];
-  const wds = data.withdrawals || data.items || [];
-  root.innerHTML = `
-  <div class="container" style="padding:16px">
-    <div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › Выводы</div>
-    <div class="admin-tabs" id="adminWdTabs">
-      ${tabs.map(t => `<button class="admin-tab${status === t.key ? ' active' : ''}" data-status="${t.key}">${t.label}</button>`).join('')}
+window.adminFilterWithdrawals = async function() {
+  const c = document.getElementById('adminContent');
+  if(c) await adminRenderWithdrawals(c);
+};
+
+window.adminWdAction = async function(wdId, action) {
+  let reason = '';
+  if(action === 'reject') { reason = prompt('Причина отказа:'); if(!reason) return; }
+  const r = await apiFetch('/api/admin/withdrawal/' + wdId + '/action', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action, reason})});
+  if(r.ok) { toast(action==='approve'?'✅ Одобрено':'❌ Отклонено'); adminRenderWithdrawals(document.getElementById('adminContent')); }
+  else toast('❌ ' + (r.error||'Ошибка'));
+};
+
+function adminRenderBroadcast(c) {
+  c.innerHTML = `<div class="admin-user-card">
+    <h4>📢 ${t('admin.broadcast')}</h4>
+    <div class="admin-broadcast-form">
+      <label>Фильтр пользователей</label>
+      <select id="adminBroadcastFilter" class="admin-select">
+        <option value="">Все пользователи</option>
+        <option value="premium">Premium</option>
+        <option value="verified">Verified</option>
+        <option value="with_balance">С балансом</option>
+      </select>
+      <label>Сообщение (HTML)</label>
+      <textarea id="adminBroadcastText" class="admin-textarea" rows="6" placeholder="Текст рассылки..."></textarea>
+      <button class="admin-action-btn admin-btn-green" onclick="adminSendBroadcast()" style="margin-top:8px;width:100%">📢 Отправить рассылку</button>
     </div>
-    <div style="margin-top:12px">
-      ${wds.length > 0 ? wds.map(w => `
-        <div class="admin-wd-item">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start">
-            <div>
-              <div style="font-weight:600;color:#EAECEF;font-size:13px">Пользователь #${w.profile_id || w.user_id || '—'}</div>
-              <div style="font-size:12px;color:#848E9C;margin-top:4px">${parseFloat(w.amount_rub || w.amount || 0).toFixed(0)} ₽ (${parseFloat(w.usdt_required || w.amount_usdt || 0).toFixed(2)} USDT)</div>
-              <div style="font-size:11px;color:#848E9C;margin-top:2px">💳 ${w.card_number || '—'}</div>
-              <div style="font-size:11px;color:#5E6673;margin-top:2px">${w.created_at ? new Date(w.created_at).toLocaleString('ru-RU') : ''}</div>
-            </div>
-            <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
-              <span style="font-size:11px;padding:3px 8px;border-radius:4px;background:${w.status === 'pending' ? 'rgba(240,185,11,0.15);color:#F0B90B' : w.status === 'completed' ? 'rgba(14,203,129,0.15);color:#0ECB81' : 'rgba(246,70,93,0.15);color:#F6465D'}">${w.status || '—'}</span>
-              ${w.status === 'pending' ? `
-                <div style="display:flex;gap:6px">
-                  <button class="btn btn-green" style="padding:4px 10px;font-size:11px" data-wd-id="${w.id}" data-action="approve">✓</button>
-                  <button class="btn btn-red" style="padding:4px 10px;font-size:11px" data-wd-id="${w.id}" data-action="reject">✕</button>
-                </div>
-              ` : ''}
-            </div>
-          </div>
-        </div>
-      `).join('') : '<div style="text-align:center;padding:32px 0;color:#848E9C">Нет записей</div>'}
-    </div>
-    ${(data.pages || 1) > 1 ? `
-    <div style="display:flex;justify-content:center;gap:8px;margin-top:16px">
-      ${page > 1 ? `<button class="btn btn-outline" id="adminWdPrev">← Назад</button>` : ''}
-      <span style="color:#848E9C;font-size:12px;align-self:center">${page} / ${data.pages}</span>
-      ${page < data.pages ? `<button class="btn btn-outline" id="adminWdNext">Далее →</button>` : ''}
-    </div>` : ''}
   </div>`;
-  document.getElementById('adminBack').onclick = renderAdminPanel;
-  document.querySelectorAll('#adminWdTabs .admin-tab').forEach(btn => {
-    btn.onclick = () => renderAdminWithdrawals(btn.dataset.status, 1);
-  });
-  document.querySelectorAll('[data-wd-id]').forEach(btn => {
-    btn.onclick = async () => {
-      const id = btn.dataset.wdId;
-      const action = btn.dataset.action;
-      let reason = '';
-      if (action === 'reject') { reason = prompt('Причина отклонения:') || ''; }
-      try {
-        const res = await apiFetch(`/api/admin/withdrawal/${id}/action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, reason }) });
-        const d = await res.json();
-        if (d.ok || res.ok) { toast(`✅ Вывод ${action === 'approve' ? 'одобрен' : 'отклонён'}`); renderAdminWithdrawals(status, page); } else toast(d.error || 'Ошибка');
-      } catch(e) { toast('Ошибка сети'); }
-    };
-  });
-  document.getElementById('adminWdPrev')?.addEventListener('click', () => renderAdminWithdrawals(status, page - 1));
-  document.getElementById('adminWdNext')?.addEventListener('click', () => renderAdminWithdrawals(status, page + 1));
 }
 
-// -------- Admin Broadcast ----------
-async function renderAdminBroadcast() {
-  if (!userData?.is_admin) return;
-  setActive('profile');
-  const root = document.getElementById('root');
-  root.innerHTML = `
-  <div class="container" style="padding:16px">
-    <div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › Рассылка</div>
-    <div class="admin-section" style="margin-top:12px">
-      <div class="admin-section-title">📢 Массовая рассылка</div>
-      <div style="margin-top:12px">
-        <label class="label">Сообщение</label>
-        <textarea class="input" id="broadcastText" rows="5" placeholder="Введите сообщение для рассылки..." style="resize:vertical;min-height:100px"></textarea>
-      </div>
-      <div style="margin-top:12px">
-        <label class="label">Фильтр получателей</label>
-        <select class="input" id="broadcastFilter" style="cursor:pointer">
-          <option value="all">Все пользователи</option>
-          <option value="premium">Только Premium</option>
-          <option value="verified">Только верифицированные</option>
-          <option value="with_balance">С балансом > 0</option>
-        </select>
-      </div>
-      <button class="btn btn-primary" id="broadcastSend" style="width:100%;margin-top:16px;padding:12px">📤 Отправить рассылку</button>
+window.adminSendBroadcast = async function() {
+  const text = document.getElementById('adminBroadcastText')?.value;
+  if(!text) { toast('Введите сообщение'); return; }
+  const filter = document.getElementById('adminBroadcastFilter')?.value || null;
+  if(!confirm('Отправить рассылку?')) return;
+  toast('📢 Отправка...');
+  const r = await apiFetch('/api/admin/broadcast', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text, filter})});
+  if(r.ok) toast(`✅ Отправлено: ${r.sent}, Ошибок: ${r.failed}`);
+  else toast('❌ Ошибка');
+};
+
+function adminRenderChecks(c) {
+  c.innerHTML = `<div class="admin-user-card">
+    <h4>🎁 ${t('admin.create_check')}</h4>
+    <div class="admin-check-form">
+      <label>Сумма (USDT)</label>
+      <input type="number" id="adminCheckAmount" class="admin-input" placeholder="10.00" step="0.01" />
+      <label>Срок действия (часов)</label>
+      <input type="number" id="adminCheckHours" class="admin-input" value="24" />
+      <button class="admin-action-btn admin-btn-green" onclick="adminCreateCheck()" style="margin-top:8px;width:100%">🎁 Создать чек</button>
     </div>
+    <div id="adminCheckResult"></div>
   </div>`;
-  document.getElementById('adminBack').onclick = renderAdminPanel;
-  document.getElementById('broadcastSend').onclick = async () => {
-    const text = document.getElementById('broadcastText').value.trim();
-    const filter = document.getElementById('broadcastFilter').value;
-    if (!text) return toast('Введите сообщение');
-    if (!confirm(`Отправить рассылку (фильтр: ${filter})?\n\n${text.substring(0, 100)}${text.length > 100 ? '...' : ''}`)) return;
-    try {
-      const res = await apiFetch('/api/admin/broadcast', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, filter }) });
-      const d = await res.json();
-      if (d.ok || res.ok) toast(`✅ Рассылка отправлена: ${d.sent || '?'} сообщений`); else toast(d.error || 'Ошибка');
-    } catch(e) { toast('Ошибка сети'); }
-  };
 }
 
-// -------- Admin Logs ----------
-async function renderAdminLogs(page = 1) {
-  if (!userData?.is_admin) return;
-  setActive('profile');
-  const root = document.getElementById('root');
-  if (typeof page !== 'number') page = 1;
-  root.innerHTML = '<div class="container" style="padding:16px"><div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › Логи</div><div style="text-align:center;padding:40px 0;color:#848E9C">Загрузка...</div></div>';
-  document.getElementById('adminBack')?.addEventListener('click', renderAdminPanel);
-  let data = { logs: [], total: 0, page: 1, pages: 1 };
-  try {
-    const res = await apiFetch(`/api/admin/logs?page=${page}&limit=50`);
-    if (res.ok) data = await res.json();
-  } catch(e) {}
-  const logs = data.logs || data.items || [];
-  root.innerHTML = `
-  <div class="container" style="padding:16px">
-    <div class="admin-breadcrumb"><span class="admin-back-btn" id="adminBack">🛡️ Админ</span> › Логи</div>
-    <div style="margin-top:12px">
-      ${logs.length > 0 ? logs.map(log => `
-        <div class="admin-log-item">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start">
-            <div>
-              <div style="font-weight:600;color:#EAECEF;font-size:13px">${log.action || '—'}</div>
-              <div style="font-size:11px;color:#848E9C;margin-top:2px">Админ: ${log.admin || log.admin_username || '—'} → ${log.target || log.target_user || '—'}</div>
-              ${log.old_value !== undefined || log.new_value !== undefined ? `<div style="font-size:11px;color:#5E6673;margin-top:2px">${log.old_value ?? ''} → ${log.new_value ?? ''}</div>` : ''}
-            </div>
-            <span style="font-size:10px;color:#5E6673;white-space:nowrap">${log.created_at ? new Date(log.created_at).toLocaleString('ru-RU') : ''}</span>
-          </div>
-        </div>
-      `).join('') : '<div style="text-align:center;padding:32px 0;color:#848E9C">Нет записей</div>'}
-    </div>
-    ${(data.pages || 1) > 1 ? `
-    <div style="display:flex;justify-content:center;gap:8px;margin-top:16px">
-      ${page > 1 ? `<button class="btn btn-outline" id="adminLogPrev">← Назад</button>` : ''}
-      <span style="color:#848E9C;font-size:12px;align-self:center">${page} / ${data.pages}</span>
-      ${page < data.pages ? `<button class="btn btn-outline" id="adminLogNext">Далее →</button>` : ''}
-    </div>` : ''}
-  </div>`;
-  document.getElementById('adminBack').onclick = renderAdminPanel;
-  document.getElementById('adminLogPrev')?.addEventListener('click', () => renderAdminLogs(page - 1));
-  document.getElementById('adminLogNext')?.addEventListener('click', () => renderAdminLogs(page + 1));
+window.adminCreateCheck = async function() {
+  const amount_usdt = parseFloat(document.getElementById('adminCheckAmount')?.value);
+  const expires_in_hours = parseInt(document.getElementById('adminCheckHours')?.value) || 24;
+  if(!amount_usdt || amount_usdt <= 0) { toast('Введите сумму'); return; }
+  const r = await apiFetch('/api/admin/check/create', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({amount_usdt, expires_in_hours})});
+  const res = document.getElementById('adminCheckResult');
+  if(r.ok) {
+    res.innerHTML = `<div class="admin-check-success">
+      <div style="color:#00E676;font-weight:bold;margin-bottom:8px">✅ Чек создан!</div>
+      <div>💰 Сумма: $${fmtNum(r.amount_usdt, 2)}</div>
+      <div>🔗 Ссылка:</div>
+      <input type="text" value="${r.check_link}" class="admin-input" style="margin-top:4px" readonly onclick="this.select();document.execCommand('copy');toast('📋 Скопировано')" />
+      <div style="margin-top:4px;font-size:12px;color:#5A6577">Код: ${r.check_code}</div>
+      <div style="font-size:12px;color:#5A6577">Истекает: ${new Date(r.expires_at).toLocaleString()}</div>
+    </div>`;
+    toast('✅ Чек создан');
+  } else { res.innerHTML = `<div style="color:#FF5252;margin-top:8px">${r.error||'Ошибка'}</div>`; }
+};
+
+async function adminRenderLogs(c) {
+  const params = new URLSearchParams({page: adminLogsPage, limit: 50});
+  const r = await apiFetch('/api/admin/logs?' + params);
+  if(!r.ok) { c.innerHTML = '<div style="color:#FF5252">Ошибка</div>'; return; }
+  let html = '<div class="admin-table-wrap"><table class="admin-table"><tr><th>Action</th><th>User</th><th>Before</th><th>After</th><th>Reason</th><th>Date</th></tr>';
+  for(const log of r.logs) {
+    html += `<tr><td>${log.action}</td><td>${log.user_id||'-'}</td><td style="font-size:11px;max-width:100px;overflow:hidden">${log.before_value||'-'}</td><td style="font-size:11px;max-width:100px;overflow:hidden">${log.after_value||'-'}</td><td>${log.reason||'-'}</td><td style="white-space:nowrap">${log.created_at?new Date(log.created_at).toLocaleString():'-'}</td></tr>`;
+  }
+  html += '</table></div>';
+  if(r.pages > 1) {
+    html += `<div class="admin-pagination">
+      ${adminLogsPage > 1 ? `<button class="admin-page-btn" onclick="adminLogsPage--;adminLoadTab('logs')">←</button>` : ''}
+      <span>${adminLogsPage}/${r.pages}</span>
+      ${adminLogsPage < r.pages ? `<button class="admin-page-btn" onclick="adminLogsPage++;adminLoadTab('logs')">→</button>` : ''}
+    </div>`;
+  }
+  c.innerHTML = html;
 }
 
 window.addEventListener('DOMContentLoaded', async ()=>{
@@ -4117,6 +3919,7 @@ window.addEventListener('DOMContentLoaded', async ()=>{
   }
   
   await loadTranslations();
+  setLang(i18n.lang);
   await ensureUser();
   await renderAssets(); // Wait for initial data to load
   
@@ -4133,7 +3936,7 @@ window.addEventListener('DOMContentLoaded', async ()=>{
   if (checkCode) {
     // Show activation dialog
     setTimeout(async () => {
-      const confirm = window.confirm(`У вас есть чек!\n\nАктивировать чек?\nКод: ${checkCode}`);
+      const confirm = window.confirm(`${t('gift.activate_confirm')}\n${t('gift.code_label')}: ${checkCode}`);
       if (confirm) {
         await activateCheck(checkCode);
         // Remove check from URL
@@ -4147,22 +3950,37 @@ window.addEventListener('DOMContentLoaded', async ()=>{
     hideSplashScreen();
   }, 800); // Shorter delay since we already waited for renderAssets()
   
+  function navTransition(renderFn, tabName) {
+    return async () => {
+      const root = document.getElementById('root');
+      if (!root) return;
+      if (tg?.HapticFeedback) tg.HapticFeedback.selectionChanged();
+      root.style.transition = 'opacity 0.15s ease, transform 0.15s ease';
+      root.style.opacity = '0';
+      root.style.transform = 'translateY(8px)';
+      await new Promise(r => setTimeout(r, 150));
+      await renderFn();
+      root.style.transition = 'opacity 0.25s ease, transform 0.25s cubic-bezier(0.34,1.56,0.64,1)';
+      root.style.opacity = '1';
+      root.style.transform = 'translateY(0)';
+    };
+  }
+
   const a=document.querySelector('.nav-item[data-tab="assets"]');
   const tradeTab=document.querySelector('.nav-item[data-tab="trade"]');
   const s=document.querySelector('.nav-item[data-tab="referrals"]');
-  if(a) a.onclick = renderAssets;
-  if(tradeTab) tradeTab.onclick = renderTrade;
-  if(s) s.onclick = renderReferrals;
+  if(a) a.onclick = navTransition(renderAssets, 'assets');
+  if(tradeTab) tradeTab.onclick = navTransition(renderTrade, 'trade');
+  if(s) s.onclick = navTransition(renderReferrals, 'referrals');
   const profileTab = document.querySelector('.nav-item[data-tab="profile"]');
-  if(profileTab) profileTab.onclick = () => {
-    if(userData?.is_admin) renderAdminPanel();
-    else renderProfile();
-  };
+  if(profileTab) profileTab.onclick = navTransition(() => {
+    if(userData?.is_admin) return renderAdminPanel();
+    else return renderProfile();
+  }, 'profile');
+
   const btnLang=document.getElementById('btnLang');
   if(btnLang){ btnLang.onclick = ()=>{ setLang(i18n.lang==='ru'?'en':'ru', true); toast(t('toast.saved')); }; }
 });
-
-window.createCheck = createCheck;
 
 // -------- Pull to Refresh ----------
 let currentTab = 'assets';
@@ -4198,10 +4016,10 @@ function initPullToRefresh() {
         indicator.classList.add('visible');
         
         if (pullDistance >= threshold) {
-          pullText.textContent = i18n.lang === 'en' ? 'Release to refresh' : 'Отпустите для обновления';
+          pullText.textContent = t('pull.release');
           pullArrow.classList.add('rotated');
         } else {
-          pullText.textContent = i18n.lang === 'en' ? 'Pull to refresh' : 'Потяните для обновления';
+          pullText.textContent = t('pull.refresh');
           pullArrow.classList.remove('rotated');
         }
       }
@@ -4218,7 +4036,7 @@ function initPullToRefresh() {
     
     if (pullArrow?.classList.contains('rotated')) {
       isRefreshing = true;
-      pullText.textContent = i18n.lang === 'en' ? 'Refreshing...' : 'Обновление...';
+      pullText.textContent = t('pull.refreshing');
       pullArrow.classList.remove('rotated');
       indicator.classList.add('refreshing');
       
@@ -4240,7 +4058,7 @@ function initPullToRefresh() {
           else await renderProfile();
         }
         
-        toast(i18n.lang === 'en' ? 'Updated!' : 'Обновлено!');
+        toast(t('common.updated'));
       } catch (e) {
         console.error('Refresh failed', e);
       }
