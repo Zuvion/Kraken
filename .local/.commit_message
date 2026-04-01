@@ -1,0 +1,14 @@
+Clean up and prepare for Railway deployment + admin panel
+
+Changes:
+- Auto-detect PORT from env var (Railway sets it automatically)
+- Auto-detect HOST_BASE from RAILWAY_PUBLIC_DOMAIN
+- Auto-add Railway domain to CORS allowed origins
+- Fix OPTIONS preflight: skip auth middleware for OPTIONS requests (required for CORS)
+- Add health check config to railway.json
+- Add runtime.txt (Python 3.11.14)
+- Remove deprecated AdminBalancePayload.type field (virtual_balance remnant)
+- Remove deprecated /api/user/currency endpoint (fiat currencies removed)
+- Remove balance_type from admin_adjust transaction details
+- Update .env.example with ADMIN_PANEL_URL and Railway vars
+- Update replit.md with Railway deployment section
